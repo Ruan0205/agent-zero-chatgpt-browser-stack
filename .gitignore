@@ -1,0 +1,14 @@
+.env
+data/
+*.tar.gz
+*.pyc
+**/__pycache__/
+**/*.before-*
+**/*.bak*
+docker-compose.*-source.yml
+Dockerfile.*-source
+package*-source.json
+package*.browser-source.json
+agent-zero/agent-monitor-plugin/webui/vnc-runtime.json
+.DS_Store
+Thumbs.db

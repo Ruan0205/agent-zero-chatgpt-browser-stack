@@ -1,0 +1,6 @@
+name: _meta_ai_image
+title: Meta AI Image Bridge
+description: Routes Agent Zero image generation requests through the owner's Meta AI WhatsApp chat.
+version: 1.0.0
+always_enabled: true
+

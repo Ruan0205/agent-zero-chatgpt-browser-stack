@@ -1,0 +1,5 @@
+name: browser_session_bridge
+title: Browser conversation isolation
+description: Bind browser model calls to the real Agent Zero conversation ID.
+version: 1.0.0
+always_enabled: true

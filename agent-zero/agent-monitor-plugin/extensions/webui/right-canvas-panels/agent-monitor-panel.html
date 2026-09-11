@@ -1,0 +1,11 @@
+<div
+  class="right-canvas-surface-panel agent-monitor-canvas-surface"
+  data-surface-id="agent-monitor"
+  :class="{
+    'is-active': $store.rightCanvas?.isSurfaceVisible('agent-monitor'),
+    'is-mounted': $store.rightCanvas?.isSurfaceRendered('agent-monitor')
+  }"
+  :aria-hidden="(!$store.rightCanvas?.isSurfaceVisible('agent-monitor')).toString()"
+>
+  <x-component path="/plugins/_agent_monitor/webui/main.html" mode="canvas"></x-component>
+</div>

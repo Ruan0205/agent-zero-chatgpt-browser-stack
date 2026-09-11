@@ -1,0 +1,11 @@
+<div
+  class="right-canvas-surface-panel vscode-canvas-surface"
+  data-surface-id="vscode"
+  :class="{
+    'is-active': $store.rightCanvas?.isSurfaceVisible('vscode'),
+    'is-mounted': $store.rightCanvas?.isSurfaceRendered('vscode')
+  }"
+  :aria-hidden="(!$store.rightCanvas?.isSurfaceVisible('vscode')).toString()"
+>
+  <x-component path="/plugins/_vscode/webui/main.html" mode="canvas"></x-component>
+</div>

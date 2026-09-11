@@ -1,0 +1,116 @@
+<style>
+  .agent-monitor-surface {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: 48px minmax(0, 1fr);
+    overflow: hidden;
+    background: #111318;
+    color: #eef2f7;
+  }
+
+  .agent-monitor-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+    background: linear-gradient(135deg, #171a21 0%, #202631 100%);
+    font: 600 13px/1.2 system-ui, sans-serif;
+  }
+
+  .agent-monitor-brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    margin-right: auto;
+  }
+
+  .agent-monitor-brand .material-symbols-outlined {
+    color: #9ecbff;
+    font-size: 21px;
+  }
+
+  .agent-monitor-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #b8c1cf;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .agent-monitor-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    background: #f1b84b;
+    box-shadow: 0 0 9px currentColor;
+  }
+
+  .agent-monitor-status[data-state="online"] .agent-monitor-dot {
+    color: #34d399;
+    background: #34d399;
+  }
+
+  .agent-monitor-status[data-state="offline"] .agent-monitor-dot {
+    color: #fb7185;
+    background: #fb7185;
+  }
+
+  .agent-monitor-action {
+    width: 32px;
+    height: 32px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9px;
+    display: grid;
+    place-items: center;
+    color: #d7deea;
+    background: rgba(255, 255, 255, 0.05);
+    cursor: pointer;
+  }
+
+  .agent-monitor-action:hover {
+    color: #fff;
+    border-color: rgba(158, 203, 255, 0.55);
+    background: rgba(158, 203, 255, 0.12);
+  }
+
+  .agent-monitor-action .material-symbols-outlined {
+    font-size: 19px;
+  }
+
+  .agent-monitor-frame {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    border: 0;
+    background: #181818;
+  }
+</style>
+
+<div class="agent-monitor-surface">
+  <div class="agent-monitor-toolbar">
+    <div class="agent-monitor-brand">
+      <span class="material-symbols-outlined">monitor_heart</span>
+      <span>ChatGPT Browser (VNC)</span>
+    </div>
+    <span class="agent-monitor-status" data-state="loading">
+      <span class="agent-monitor-dot"></span>
+      <span class="agent-monitor-status-text">Carregando VNC…</span>
+    </span>
+    <button class="agent-monitor-action agent-monitor-refresh" type="button" title="Atualizar painel" aria-label="Atualizar painel">
+      <span class="material-symbols-outlined">refresh</span>
+    </button>
+    <button class="agent-monitor-action agent-monitor-popout" type="button" title="Abrir em tela inteira" aria-label="Abrir em tela inteira">
+      <span class="material-symbols-outlined">open_in_new</span>
+    </button>
+  </div>
+  <iframe
+    class="agent-monitor-frame"
+    title="ChatGPT Browser via noVNC"
+    allow="clipboard-read; clipboard-write; microphone"
+  ></iframe>
+</div>

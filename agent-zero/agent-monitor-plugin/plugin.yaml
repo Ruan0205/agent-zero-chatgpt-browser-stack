@@ -1,0 +1,5 @@
+name: _agent_monitor
+title: ChatGPT Browser (VNC)
+description: Painel noVNC integrado para acompanhar o navegador automatizado usado pelo Agent Zero.
+version: 1.2.0
+always_enabled: true

@@ -1,0 +1,167 @@
+name: agent-zero-browser-stack
+
+services:
+  bootstrap:
+    image: alpine:3.22
+    container_name: agent-zero-bootstrap
+    restart: "no"
+    environment:
+      VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
+      CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
+    volumes:
+      - ./scripts/bootstrap.sh:/bootstrap.sh:ro
+      - ./agent-zero/seed:/seed:ro
+      - ${STACK_DATA_DIR:-./data}:/data
+    command: ["/bin/sh", "/bootstrap.sh"]
+
+  featherless-queue:
+    build: ./agent-zero/featherless-queue
+    container_name: agent-zero-featherless-queue
+    restart: unless-stopped
+    environment:
+      FEATHERLESS_UPSTREAM_URL: https://api.featherless.ai/v1
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:50080/}
+      FEATHERLESS_APP_TITLE: Agent Zero Browser Stack
+      MAX_ATTEMPTS: "4"
+      UPSTREAM_READ_TIMEOUT: "180"
+    networks: [ai-shared]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  meta-ai-whatsapp:
+    build: ./agent-zero/meta-ai-whatsapp
+    container_name: agent-zero-meta-ai-whatsapp
+    restart: unless-stopped
+    environment:
+      WA_PHONE: ${WA_PHONE:-}
+      WA_PORT: "8788"
+      WA_TIMEOUT_MS: "300000"
+      WA_UPLOAD_DIR: /data/uploads
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - ${STACK_DATA_DIR:-./data}/meta-ai-whatsapp:/data
+      - ${STACK_DATA_DIR:-./data}/agent-zero/uploads:/data/uploads
+    networks: [ai-shared]
+
+  vscode:
+    build: ./agent-zero/vscode
+    container_name: agent-zero-vscode
+    restart: unless-stopped
+    user: root
+    privileged: true
+    environment:
+      VSCODE_EXEC_TOKEN: ${VSCODE_EXEC_TOKEN:?configure VSCODE_EXEC_TOKEN in .env}
+      TZ: ${TZ:-America/Sao_Paulo}
+    ports:
+      - "${VSCODE_PORT:-50082}:8080"
+    volumes:
+      - ${STACK_DATA_DIR:-./data}/workspace/chats:/workspace/chats
+      - ${STACK_DATA_DIR:-./data}/vscode-config:/root/.local/share/code-server
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [ai-shared]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  chatgpt-browser-agent:
+    build: ./chatgpt-browser-agent
+    container_name: chatgpt-browser-agent
+    restart: unless-stopped
+    stop_grace_period: 15m
+    init: true
+    shm_size: 2gb
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
+      MODEL_ID: chatgpt-browser
+      MAX_PROMPT_CHARS: "200000"
+      BROWSER_OWNS_HISTORY: "true"
+      BROWSER_REQUEST_TIMEOUT_MS: "130000"
+      PROVIDER_429_RETRIES: "2"
+      PROVIDER_429_RETRY_DELAY_MS: "30000"
+      IDLE_RECYCLE_MS: "0"
+    volumes:
+      - ${STACK_DATA_DIR:-./data}/browser:/data
+      - ${STACK_DATA_DIR:-./data}/browser-workspace:/workspace
+    working_dir: /workspace
+    ports:
+      - "${CHATGPT_VNC_PORT:-50081}:6080"
+    networks: [ai-shared]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  agent-zero:
+    image: ${AGENT_ZERO_IMAGE:-agent0ai/agent-zero@sha256:a38802ee1ddb83747836521931a99b8f6af000c586e1176478c533dcb08de8c4}
+    container_name: agent-zero
+    restart: unless-stopped
+    user: root
+    privileged: true
+    pid: host
+    env_file: [.env]
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      A0_SET_agent_profile: agent0
+      A0_SET_chat_model_provider: other
+      A0_SET_chat_model_name: ${DEFAULT_MODEL:-Blackfrost-AI/Qwen3.8-27B-ABLITERATED-BF16}
+      A0_SET_chat_model_api_base: http://agent-zero-featherless-queue:8000/v1
+      A0_SET_chat_model_ctx_length: "32768"
+      A0_SET_util_model_provider: other
+      A0_SET_util_model_name: ${UTILITY_MODEL:-google/gemma-4-E2B-it}
+      A0_SET_util_model_api_base: http://agent-zero-featherless-queue:8000/v1
+      A0_SET_util_model_ctx_length: "32768"
+      A0_SET_max_consecutive_unusable_responses: "3"
+      A0_SET_timezone: ${TZ:-America/Sao_Paulo}
+      VSCODE_EXEC_TOKEN: ${VSCODE_EXEC_TOKEN:?configure VSCODE_EXEC_TOKEN in .env}
+    ports:
+      - "${AGENT_ZERO_PORT:-50080}:80"
+      - "${AGENT_ZERO_SSH_PORT:-50022}:22"
+    volumes:
+      - ${STACK_DATA_DIR:-./data}/agent-zero:/a0/usr
+      - ${STACK_DATA_DIR:-./data}/whatsapp:/a0/tmp/whatsapp
+      - ./agent-zero/overrides/call_subordinate.py:/a0/tools/call_subordinate.py:ro
+      - ./agent-zero/overrides/_50_memorize_fragments.py:/a0/plugins/_memory/extensions/python/monologue_end/_50_memorize_fragments.py:ro
+      - ./agent-zero/overrides/_51_memorize_solutions.py:/a0/plugins/_memory/extensions/python/monologue_end/_51_memorize_solutions.py:ro
+      - ./agent-zero/overrides/_30_repeat_response.py:/a0/extensions/python/message_loop_result/_30_repeat_response.py:ro
+      - ./agent-zero/overrides/fw.msg_repeat.md:/a0/prompts/fw.msg_repeat.md:ro
+      - ./agent-zero/overrides/whatsapp_handler_secure.py:/a0/plugins/_whatsapp_integration/helpers/handler.py:ro
+      - ./agent-zero/overrides/wa_response_attachments.py:/a0/plugins/_whatsapp_integration/extensions/python/tool_execute_after/_50_wa_response.py:ro
+      - ./agent-zero/overrides/wa_reply_attachments.py:/a0/plugins/_whatsapp_integration/extensions/python/process_chain_end/_55_wa_reply.py:ro
+      - ./agent-zero/overrides/fw.wa.self_chat_prefix.md:/a0/plugins/_whatsapp_integration/prompts/fw.wa.self_chat_prefix.md:ro
+      - ./agent-zero/overrides/whatsapp_bridge_meta.js:/a0/plugins/_whatsapp_integration/whatsapp-bridge/bridge.js:ro
+      - ./agent-zero/meta-ai-image-plugin:/a0/plugins/_meta_ai_image:ro
+      - ./agent-zero/vscode-plugin:/a0/plugins/_vscode:ro
+      - ./agent-zero/agent-monitor-plugin:/a0/plugins/_agent_monitor:ro
+      - ${STACK_DATA_DIR:-./data}/agent-monitor/vnc-runtime.json:/a0/plugins/_agent_monitor/webui/vnc-runtime.json:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_ROOT_MOUNT:-/}:/host:rw
+      - ${STACK_DATA_DIR:-./data}/workspace:/workspace:rw
+      - ${VAULT_PATH:-./data/vault}:/vault:rw
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    networks: [ai-shared]
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      featherless-queue:
+        condition: service_healthy
+      meta-ai-whatsapp:
+        condition: service_started
+      vscode:
+        condition: service_healthy
+      chatgpt-browser-agent:
+        condition: service_healthy
+
+networks:
+  ai-shared:
+    name: ai-shared
+    driver: bridge

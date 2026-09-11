@@ -1,0 +1,91 @@
+- name: Default
+  chat:
+    provider: other
+    name: Blackfrost-AI/Qwen3.8-27B-ABLITERATED-BF16
+    api_base: http://agent-zero-featherless-queue:8000/v1
+    kwargs:
+      chat_template_kwargs:
+        enable_thinking: false
+      temperature: 0.4
+    ctx_length: 32768
+    ctx_history: 0.5
+    vision: true
+    max_embeds: 10
+    rl_requests: 0
+    rl_input: 0
+    rl_output: 0
+  utility:
+    provider: other
+    name: google/gemma-4-E2B-it
+    api_base: http://agent-zero-featherless-queue:8000/v1
+    kwargs:
+      chat_template_kwargs:
+        enable_thinking: false
+      temperature: 0.4
+    ctx_length: 32768
+    ctx_input: 0.5
+    rl_requests: 0
+    rl_input: 0
+    rl_output: 0
+  embedding:
+    provider: huggingface
+    name: sentence-transformers/all-MiniLM-L6-v2
+    api_base: ''
+    rl_requests: 0
+    rl_input: 0
+- name: Efficiency
+  chat:
+    provider: other
+    name: Blackfrost-AI/Qwen3.8-27B-ABLITERATED-BF16
+    api_base: http://agent-zero-featherless-queue:8000/v1
+    kwargs:
+      chat_template_kwargs:
+        enable_thinking: false
+      temperature: 0.4
+    ctx_length: 32768
+    ctx_history: 0.5
+    vision: true
+    max_embeds: 10
+    rl_requests: 0
+    rl_input: 0
+    rl_output: 0
+  utility:
+    provider: other
+    name: google/gemma-4-E2B-it
+    api_base: http://agent-zero-featherless-queue:8000/v1
+    kwargs:
+      chat_template_kwargs:
+        enable_thinking: false
+      temperature: 0.4
+    ctx_length: 32768
+    ctx_input: 0.5
+  embedding:
+    provider: huggingface
+    name: sentence-transformers/all-MiniLM-L6-v2
+    api_base: ''
+- name: Power
+  chat:
+    provider: other
+    name: chatgpt-browser
+    api_base: http://chatgpt-browser-agent:8000/v1
+    kwargs:
+      temperature: 0.4
+    ctx_length: 49152
+    ctx_history: 0.5
+    vision: true
+    max_embeds: 10
+    rl_requests: 0
+    rl_input: 0
+    rl_output: 0
+  utility:
+    provider: other
+    name: google/gemma-4-E2B-it
+    api_base: http://agent-zero-featherless-queue:8000/v1
+    kwargs:
+      temperature: 0.4
+    ctx_length: 32768
+    ctx_input: 0.5
+  embedding:
+    provider: huggingface
+    name: sentence-transformers/all-MiniLM-L6-v2
+    api_base: ''

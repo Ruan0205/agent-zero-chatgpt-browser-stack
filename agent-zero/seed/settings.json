@@ -1,0 +1,59 @@
+{
+    "version": "v2.11",
+    "api_keys": {},
+    "auth_login": "",
+    "auth_password": "",
+    "root_password": "",
+    "agent_profile": "agent0",
+    "agent_knowledge_subdir": "custom",
+    "max_consecutive_unusable_responses": 3,
+    "timezone": "America/Sao_Paulo",
+    "time_format": "12h",
+    "ui_control_visibility": {
+        "projectSelector": {
+            "mobile": true,
+            "desktop": true
+        },
+        "time": {
+            "mobile": false,
+            "desktop": true
+        },
+        "connectionStatus": {
+            "mobile": true,
+            "desktop": true
+        },
+        "contextWindowUsage": {
+            "mobile": true,
+            "desktop": true
+        },
+        "rightCanvasRail": {
+            "mobile": true,
+            "desktop": true
+        }
+    },
+    "workdir_path": "/a0/usr/workdir",
+    "workdir_show": true,
+    "workdir_max_depth": 5,
+    "workdir_max_files": 20,
+    "workdir_max_folders": 20,
+    "workdir_max_lines": 250,
+    "workdir_gitignore": "# Python environments & cache\nvenv/**\n**/__pycache__/**\n\n# Node.js dependencies\n**/node_modules/**\n**/.npm/**\n\n# Version control metadata\n**/.git/**",
+    "file_browser_remember_last_directory": true,
+    "rfc_auto_docker": true,
+    "rfc_url": "localhost",
+    "rfc_password": "",
+    "rfc_port_http": 55080,
+    "websocket_server_restart_enabled": true,
+    "uvicorn_access_logs_enabled": false,
+    "mcp_servers": "{\n    \"mcpServers\": {}\n}",
+    "mcp_client_init_timeout": 10,
+    "mcp_client_tool_timeout": 120,
+    "mcp_server_enabled": false,
+    "mcp_server_token": "",
+    "a2a_server_enabled": false,
+    "variables": "",
+    "secrets": "",
+    "litellm_global_kwargs": {},
+    "update_check_enabled": true,
+    "chat_inherit_project": true
+}

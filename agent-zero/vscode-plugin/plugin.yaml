@@ -1,0 +1,5 @@
+name: _vscode
+title: VS Code
+description: Full code-server workspace and terminal integration isolated per Agent Zero chat.
+version: 1.0.0
+always_enabled: true
