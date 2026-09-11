@@ -58,7 +58,7 @@ O Chrome é executado no container; não é necessária GPU.
 ## Instalação rápida
 
 ```bash
-git clone REPOSITORY_URL
+git clone https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
 cd agent-zero-chatgpt-browser-stack
 chmod +x scripts/*.sh
 ./scripts/setup.sh
@@ -191,6 +191,9 @@ docker compose config --quiet
 # Testes do protocolo/bridge ChatGPT Browser
 docker run --rm -v "$PWD/chatgpt-browser-agent:/app" -w /app node:22-bookworm-slim \
   node --test bridge-core.test.js
+
+# Smoke test isolado das quatro imagens construídas
+./scripts/validate-images.sh
 
 # Saúde com a stack em execução
 set -a; . ./.env; set +a
