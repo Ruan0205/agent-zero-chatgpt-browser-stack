@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const bridge = require('./bridge-core');
 const { BrowserPool } = require('./browser-pool');
 const { IncidentAuditor } = require('./incident-auditor');
+const { compactUtilityBody } = require('./utility-compactor');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8000);
 const SCRIPT = process.env.CHATGPT_BROWSER_SCRIPT || path.join(__dirname, 'chatgpt.js');
@@ -25,7 +26,8 @@ const REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || 1300
 const MEDIA_REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_MEDIA_TIMEOUT_MS || 330000);
 const PROVIDER_429_RETRIES = Math.max(0, Number(process.env.PROVIDER_429_RETRIES || 2));
 const PROVIDER_429_RETRY_DELAY_MS = Math.max(0, Number(process.env.PROVIDER_429_RETRY_DELAY_MS || 30000));
-const BROWSER_POOL_MIN = Math.max(2, Number(process.env.BROWSER_POOL_MIN || 2));
+const BROWSER_POOL_MIN = Math.max(1, Number(process.env.BROWSER_POOL_MIN || 2));
+const UTILITY_SINGLE_CHAT = process.env.UTILITY_SINGLE_CHAT === 'true';
 const BROWSER_POOL_IDLE_MS = Math.max(1_000, Number(process.env.BROWSER_POOL_IDLE_MS || 1_800_000));
 const BROWSER_POOL_DIR = process.env.BROWSER_POOL_DIR || path.join(STATE_DIR, 'browser-pool');
 const PROFILE_TEMPLATE = path.join(STATE_DIR, '.chatgpt-poc-profile');
@@ -88,6 +90,7 @@ function conversationKey(req) {
   const scope=req.headers['x-a0-call-scope'];
   if (!id || !scope) return null;
   if (!/^[\w:-]{1,160}$/.test(id) || !/^[\w:-]{1,160}$/.test(scope)) throw new Error('Invalid conversation identifier');
+  if(UTILITY_SINGLE_CHAT && /^utility(?:[:]|$)/i.test(scope)) return 'utility-dedicated-chat-v1';
   return 'v2-'+crypto.createHash('sha256').update(JSON.stringify([id,scope])).digest('hex');
 }
 
@@ -550,7 +553,8 @@ const server = http.createServer(async (req, res) => {
       
       const answer = await pool.run(chatHash,{contextId,callScope},async slot => {
         if (chatHash) chatUrl = loadChatMap()[chatHash] || null;
-        const stateFile=chatHash ? path.join(STATE_DIR,chatHash+'-segments.json') : null;
+        const utilityCall=/^utility(?:[:]|$)/i.test(callScope);
+        const stateFile=chatHash && !utilityCall ? path.join(STATE_DIR,chatHash+'-segments.json') : null;
         let known=new Set();
         let transportState=null;
         if (chatUrl && stateFile) {
@@ -576,9 +580,42 @@ const server = http.createServer(async (req, res) => {
             tool_args:{text:'Arquivo pronto e disponível na conversa.'},
           });
         }
+        let requestBody=body;
+        if(utilityCall && UTILITY_SINGLE_CHAT) {
+          const reduced=await compactUtilityBody(body,async chunkPrompt=>{
+            let result;
+            for(let attempt=0;;attempt++) {
+              try {
+                result=await runBrowser(slot,chunkPrompt,chatUrl,{
+                  timeoutMs:REQUEST_TIMEOUT_MS,
+                  reloadBeforeAttempt:attempt>0,
+                });
+                break;
+              } catch(error) {
+                if(!isProviderMessageLimit(error) || attempt>=PROVIDER_429_RETRIES) throw error;
+                if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl(slot);
+                if(!chatUrl) throw new Error('Utility 429 recovery refused: the dedicated chat URL is unknown');
+                console.warn(`[utility-compaction] provider 429; retry ${attempt+1}/${PROVIDER_429_RETRIES} after ${PROVIDER_429_RETRY_DELAY_MS}ms`);
+                await sleep(PROVIDER_429_RETRY_DELAY_MS);
+              }
+            }
+            if(!chatUrl) {
+              chatUrl=latestSessionChatUrl(slot);
+              if(chatUrl && chatHash) {
+                const chatMap=loadChatMap();
+                chatMap[chatHash]=chatUrl;
+                saveChatMap(chatMap);
+              }
+            }
+            if(!chatUrl) throw new Error('Dedicated utility chat URL missing after context chunk');
+            return result.raw;
+          });
+          requestBody=reduced.body;
+          if(reduced.compacted) console.log(`[utility-compaction] source_chars=${reduced.inputChars} chunks=${reduced.chunks} final_chars=${JSON.stringify(requestBody.messages).length}`);
+        }
         const turnTimeoutMs=isNativeMediaRequest(body)?MEDIA_REQUEST_TIMEOUT_MS:REQUEST_TIMEOUT_MS;
         const nativeMedia=isNativeMediaRequest(body) && /^main(?:[:]|$)/i.test(callScope);
-        prompt=nativeMedia ? nativeMediaPrompt(body) : bridge.buildPrompt(body,MAX_PROMPT_CHARS,chatHash ? known : null,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY,callScope});
+        prompt=nativeMedia ? nativeMediaPrompt(body) : bridge.buildPrompt(requestBody,MAX_PROMPT_CHARS,utilityCall ? null : (chatHash ? known : null),utilityCall ? null : transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY,callScope,preserveUtilityContext:UTILITY_SINGLE_CHAT});
         const allAttachmentRefs=/^main(?:[:]|$)/i.test(callScope) ? bridge.attachmentInputs(body,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY}) : [];
         const alreadyUploaded=new Set(Array.isArray(transportState?.uploadedAttachments)?transportState.uploadedAttachments:[]);
         const attachmentRefs=allAttachmentRefs.filter(ref=>!alreadyUploaded.has(ref));
@@ -686,14 +723,14 @@ const server = http.createServer(async (req, res) => {
             artifacts=recovered.artifacts;
           } else throw new Error('ChatGPT concluiu a solicitação de mídia, mas nenhum arquivo baixável foi encontrado após a recuperação única');
         }
-        try { const result=bridge.validateAnswer(raw, body,{callScope}); remember(); return mediaEnvelope(result,raw,artifacts); }
+        try { const result=bridge.validateAnswer(raw, requestBody,{callScope}); remember(); return mediaEnvelope(result,raw,artifacts); }
         catch (error) {
           if(artifacts.length && /^main(?:[:]|$)/i.test(callScope)) { remember(); return mediaEnvelope('',raw,artifacts); }
           console.warn('Response format retry:', error.message);
           auditEvents.push(`A primeira resposta teve formato inválido e foi refeita uma vez: ${error.message}`);
           if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its 130-second budget before format recovery');
           const retry = await runBrowser(slot,prompt+'\n\nYour previous attempt had this format error: '+error.message+'. Generate the next response again as valid JSON, preserving the latest user task.', chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:nativeMedia?'':expectedArtifact});
-          const result=bridge.validateAnswer(retry.raw, body,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
+          const result=bridge.validateAnswer(retry.raw, requestBody,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
         }
       });
       if(isAuditableFinalAnswer(answer)) enqueueAudit({

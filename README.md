@@ -11,6 +11,8 @@ O repositório contém as customizações funcionais da instalação de origem, 
 - Agent Zero fixado na imagem validada, com dados persistentes e presets sanitizados.
 - Modelo **Default** e **Efficiency** via fila serial Featherless.
 - Modelo **Power** `chatgpt-browser`, ligado a uma sessão persistente do ChatGPT no Chrome.
+- Modelo **Utility** `chatgpt-browser-utility` em uma VNC separada; o próprio ChatGPT
+  condensa semanticamente históricos grandes antes da resposta auxiliar.
 - Uma conversa do navegador por chat do Agent Zero, evitando misturar contextos.
 - Envio enxuto ao navegador, reutilizando o contexto mantido pelo próprio ChatGPT.
 - Espera de até 130 segundos e duas tentativas adicionais para HTTP 429, com intervalo de 30 segundos.
@@ -28,10 +30,12 @@ Navegador do usuário
   ├─ :50080  Agent Zero
   │    ├─ Default/Efficiency ──> featherless-queue ──> Featherless API
   │    ├─ Power ───────────────> chatgpt-browser-agent ──> chatgpt.com
+  │    ├─ Utility ─────────────> chatgpt-browser-utility ──> chatgpt.com
   │    ├─ ferramenta VS Code ──> code-server + executor
   │    ├─ WhatsApp self-chat ──> bridge interno persistente
   │    └─ ferramenta de imagem > meta-ai-whatsapp ──> Meta AI no WhatsApp
   ├─ :50081  noVNC / Chrome do ChatGPT Browser
+  ├─ :50084  noVNC / Chrome auxiliar dedicado
   └─ :50082  VS Code web
 
 Host Linux
@@ -47,7 +51,7 @@ Mais detalhes estão em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Linux x86_64 recente (Ubuntu/Debian são os caminhos mais simples).
 - Docker Engine 24+ e plugin Docker Compose v2.
 - Git, OpenSSL e `curl` no host.
-- Pelo menos 8 GB de RAM; 16 GB são recomendados para uso simultâneo.
+- Pelo menos 10 GB de RAM; 16 GB são recomendados para uso simultâneo.
 - Cerca de 15 GB livres para imagens, builds e perfis do navegador.
 - Conta Featherless e chave de API para os presets locais.
 - Conta ChatGPT própria para o modelo Power.
@@ -94,6 +98,7 @@ Substitua `HOST` pelo IP ou DNS do servidor:
 |---|---|---|
 | Agent Zero | `http://HOST:50080/` | `AUTH_LOGIN` / `AUTH_PASSWORD` |
 | ChatGPT Browser | `http://HOST:50081/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
+| ChatGPT Utility | `http://HOST:50084/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
 | VS Code | `http://HOST:50082/` | integrado à stack |
 
 O ícone **ChatGPT Browser (VNC)** dentro do Agent Zero abre a mesma tela `:50081/vnc.html` e injeta a senha automaticamente apenas depois do login no Agent Zero.
@@ -104,9 +109,14 @@ O ícone **ChatGPT Browser (VNC)** dentro do Agent Zero abre a mesma tela `:5008
 2. Entre com `VNC_PASSWORD` se estiver usando o endereço direto.
 3. No Chrome exibido, abra `https://chatgpt.com` e faça login manualmente.
 4. Confirme que a página normal de conversa aparece e então feche a janela do Chrome. No primeiro acesso, esse fechamento encerra o modo de configuração e inicia automaticamente o pool de navegadores.
-5. Aguarde o healthcheck ficar saudável; o Agent Zero, que depende dele, terminará de iniciar.
+5. Aguarde o healthcheck ficar saudável. A instância Utility copiará esse perfil para
+   seu próprio volume, abrirá uma VNC separada e então o Agent Zero terminará de iniciar.
 
-O perfil fica em `data/browser`. Ele não é compartilhado com o repositório nem com outras instalações. Não copie essa pasta para Git.
+Os perfis ficam em `data/browser` e `data/browser-utility`. A instância auxiliar usa
+uma cópia isolada do login do navegador principal, não exige outro login e mantém
+uma conversa auxiliar ativa para operações de resumo. Como essa conversa recebe
+conteúdo de vários chats do mesmo Agent Zero, não a use para separar dados de
+usuários diferentes. Nenhum perfil deve ser publicado no Git.
 
 Se o login Google recusar um navegador automatizado, use um método de login aceito diretamente pelo ChatGPT ou execute a autenticação manual no Chrome visível. Não desative controles de segurança da conta.
 
@@ -131,7 +141,10 @@ Os presets ficam em `agent-zero/seed/plugins/_model_config/presets.yaml` e são 
 - **Default:** Qwen 3.8 uncensored via Featherless.
 - **Efficiency:** o mesmo caminho serial Featherless, priorizando estabilidade.
 - **Power:** `chatgpt-browser`, endpoint interno `http://chatgpt-browser-agent:8000/v1`.
-- **Utility:** Gemma via Featherless, separado do modelo principal.
+- **Utility:** `chatgpt-browser-utility`, endpoint interno
+  `http://chatgpt-browser-utility:8000/v1`, um Chrome/VNC dedicado. Históricos que
+  excedam o orçamento são lidos em trechos completos e resumidos pelo próprio GPT;
+  não são apenas cortados por cabeça/cauda no bridge.
 - **Embedding:** `sentence-transformers/all-MiniLM-L6-v2`.
 
 Depois do primeiro boot, alterações feitas na interface ficam em `data/agent-zero/plugins/_model_config` e não são sobrescritas pelo repositório.
@@ -142,6 +155,7 @@ Depois do primeiro boot, alterações feitas na interface ficam em `data/agent-z
 |---|---|---|
 | `data/agent-zero` | chats, configurações, memória e uploads | Nunca |
 | `data/browser` | cookies e perfil autenticado do ChatGPT | Nunca |
+| `data/browser-utility` | cópia isolada do perfil e conversa auxiliar | Nunca |
 | `data/whatsapp` | sessão WhatsApp do Agent Zero | Nunca |
 | `data/meta-ai-whatsapp` | sessão WhatsApp do bridge Meta AI | Nunca |
 | `data/workspace` | projetos por chat | Somente após revisão |
@@ -256,7 +270,8 @@ REGRAS DE SEGURANÇA E ESCOPO
    somente no `.env` com permissão 0600. Ao final, entregue-as ao proprietário uma única
    vez sem publicar em logs, Git, histórico ou README.
 5. Peça ao proprietário somente: (a) API key e conta Featherless; (b) qual modelo
-   Default/Utility disponível deseja usar, se diferente do padrão; (c) login manual da
+   Default deseja usar, se diferente do padrão; o Utility usa a VNC dedicada;
+   (c) login manual da
    própria conta ChatGPT/Gmail dentro do noVNC; (d) telefone/pareamento manual do próprio
    WhatsApp, se quiser usar WhatsApp ou Meta AI; (e) IP/DNS e portas desejadas. Nunca peça
    senha do Gmail/ChatGPT ou código do WhatsApp por texto: abra a interface para o usuário.
@@ -274,7 +289,8 @@ INSTALAÇÃO
    perde os plugins oficiais obrigatórios.
 6. Abra `http://HOST:50081/vnc.html`, entregue o controle ao usuário para autenticar o
    ChatGPT e nunca exporte o perfil. Confirme que o Chrome permanece logado após recriar o
-   container.
+   container e que a VNC Utility em `http://HOST:50084/vnc.html` clonou o perfil sem
+   pedir outra senha.
 7. Se Meta AI for desejada, use Agent Zero > Settings > External > Meta AI WhatsApp
    Bridge para gerar o código. A conexão deve ser opcional. Configure separadamente o
    WhatsApp self-chat do Agent Zero e jamais habilite respostas para contatos não
@@ -287,7 +303,9 @@ A. Infra: compose válido; todos os healthchecks; restart individual; recriaçã
 B. Modelos: Default Qwen/Featherless, Efficiency, Utility e Power chatgpt-browser.
    Para cada um: pergunta curta, resposta longa/coesa, português, chamada de ferramenta,
    erro de ferramenta, continuação no mesmo chat e novo chat isolado. Confirme que Qwen
-   nunca abre ChatGPT e que Power cria um chat web próprio por chat Agent Zero.
+   nunca abre ChatGPT como modelo principal, que Power cria um chat web próprio por chat
+   Agent Zero e que Utility usa somente a VNC auxiliar. Envie ao Utility um histórico
+   sintético maior que 32 mil tokens e confirme compactação sem corte de trechos.
 C. Browser pool: duas conversas simultâneas em instâncias distintas; terceira demanda
    cria instância temporária; afinidade Agent-Zero-chat ↔ ChatGPT-chat; ociosa por 30 min;
    popup; timeout; página travada; um 429 e duas retentativas com 30 s; keep-alive de
@@ -366,7 +384,8 @@ A. Infra/persistência: healthchecks, restarts, clean recreation, reboot, versõ
    sessões anteriores continuam presentes.
 B. Modelos: Default Qwen/Featherless, Efficiency, Utility e Power chatgpt-browser; pergunta
    curta, longa, português, ferramenta, erro, continuação e chat novo. Sem mistura de
-   contextos ou chamada do navegador pelo Qwen.
+   contextos ou chamada do navegador pelo Qwen como modelo principal. Teste uma chamada
+   Utility grande para confirmar compactação sem corte e a VNC auxiliar na porta 50084.
 C. Pool web: duas instâncias permanentes simultâneas, terceira elástica, afinidade correta,
    expiração em 30 min, popup, timeout, erro visual, keep-alive, 429 com espera de 30 s e
    duas tentativas, nenhuma atualização desnecessária e nenhum loop.

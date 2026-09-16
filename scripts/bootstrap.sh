@@ -14,12 +14,17 @@ mkdir -p \
   "$data_root/agent-zero/memory" \
   "$data_root/agent-monitor" \
   "$data_root/browser" \
+  "$data_root/browser-utility" \
   "$data_root/browser-workspace" \
   "$data_root/vscode-config" \
   "$data_root/workspace/chats" \
   "$data_root/whatsapp" \
   "$data_root/meta-ai-whatsapp" \
   "$data_root/vault"
+
+# Both browser containers run as uid 1000. Keep existing profile contents
+# intact; only make the volume roots writable for a first installation.
+chown 1000:1000 "$data_root/browser" "$data_root/browser-utility" "$data_root/browser-workspace"
 
 copy_once() {
   source=$1

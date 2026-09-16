@@ -106,6 +106,41 @@ services:
       retries: 12
       start_period: 20s
 
+  chatgpt-browser-utility:
+    build: ./chatgpt-browser-agent
+    image: agent-zero-browser-stack-chatgpt-browser-agent
+    container_name: chatgpt-browser-utility
+    restart: unless-stopped
+    stop_grace_period: 15m
+    init: true
+    shm_size: 1gb
+    entrypoint: /usr/local/bin/browser-utility-entrypoint
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
+      MODEL_ID: chatgpt-browser-utility
+      BROWSER_POOL_MIN: "1"
+      BROWSER_OWNS_HISTORY: "false"
+      UTILITY_SINGLE_CHAT: "true"
+      BROWSER_REQUEST_TIMEOUT_MS: "180000"
+      PROVIDER_429_RETRIES: "2"
+      PROVIDER_429_RETRY_DELAY_MS: "30000"
+    volumes:
+      - ${STACK_DATA_DIR:-./data}/browser-utility:/data
+      - ${STACK_DATA_DIR:-./data}/browser:/template:ro
+    ports:
+      - "${CHATGPT_UTILITY_VNC_PORT:-50084}:6080"
+    networks: [ai-shared]
+    depends_on:
+      chatgpt-browser-agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
   agent-zero:
     build:
       context: ./agent-zero
@@ -125,9 +160,9 @@ services:
       A0_SET_chat_model_api_base: http://agent-zero-featherless-queue:8000/v1
       A0_SET_chat_model_ctx_length: "32768"
       A0_SET_util_model_provider: other
-      A0_SET_util_model_name: ${UTILITY_MODEL:-google/gemma-4-E2B-it}
-      A0_SET_util_model_api_base: http://agent-zero-featherless-queue:8000/v1
-      A0_SET_util_model_ctx_length: "32768"
+      A0_SET_util_model_name: chatgpt-browser-utility
+      A0_SET_util_model_api_base: http://chatgpt-browser-utility:8000/v1
+      A0_SET_util_model_ctx_length: "65536"
       A0_SET_max_consecutive_unusable_responses: "3"
       A0_SET_timezone: ${TZ:-America/Sao_Paulo}
       VSCODE_EXEC_TOKEN: ${VSCODE_EXEC_TOKEN:?configure VSCODE_EXEC_TOKEN in .env}
@@ -179,6 +214,8 @@ services:
       vscode:
         condition: service_healthy
       chatgpt-browser-agent:
+        condition: service_healthy
+      chatgpt-browser-utility:
         condition: service_healthy
 
 networks:

@@ -1,5 +1,15 @@
 # Changelog
 
+## Em desenvolvimento — navegador Utility dedicado
+
+- Substitui Gemma como modelo auxiliar por uma instância Chrome/noVNC isolada na porta 50084.
+- Usa um único chat auxiliar ativo para chamadas seriadas e envia cada tarefa completa,
+  evitando que pedidos de conversas diferentes dependam de instruções anteriores.
+- Divide contextos auxiliares grandes em trechos completos e pede ao GPT uma síntese
+  semântica de cada trecho antes da resposta final, em vez de cortar o transporte.
+- Mantém o login apenas nos volumes privados; a nova instância copia o perfil principal
+  no primeiro start e não compartilha o diretório de escrita com ele.
+
 ## v2.12-stack.1 — 2026-09-16
 
 - Atualiza a imagem base e os seeds para Agent Zero v2.12.

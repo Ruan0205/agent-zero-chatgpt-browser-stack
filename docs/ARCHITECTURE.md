@@ -22,6 +22,22 @@ O contexto longo é mantido pelo próprio ChatGPT. O Agent Zero envia somente o 
 
 O perfil Chrome, cookies, mapa chat↔URL, pool, outbox e incidentes ficam sob `data/browser`. O auditor opcional usa uma conversa temporária não listada para classificar a resposta final, evita auditar a si próprio e remove a conversa temporária ao terminar.
 
+### ChatGPT Browser Utility
+
+Um segundo serviço usa a mesma imagem, mas possui apenas uma instância Chrome,
+um volume independente (`data/browser-utility`) e sua própria tela noVNC na porta
+50084. No primeiro start, copia o perfil autenticado do browser principal; os
+dois serviços nunca escrevem simultaneamente no mesmo perfil. O modelo Utility
+dos três presets aponta para `http://chatgpt-browser-utility:8000/v1`.
+
+As chamadas auxiliares compartilham uma única conversa web ativa, serializada
+pelo pool. O bridge envia a tarefa completa a cada chamada e instrui o GPT a
+ignorar pedidos anteriores, que podem pertencer a outro chat Agent Zero. Quando
+um pedido de compactação excede o orçamento do navegador, o transporte divide
+o texto em trechos sem perder bytes, pede ao GPT uma síntese factual de cada
+trecho e envia as sínteses para a resposta final. Isso não elimina os limites
+do serviço ChatGPT nem transforma um resumo em cópia integral do histórico.
+
 ### Presets
 
 `agent-zero/seed/plugins/_model_config/presets.yaml` define Default, Efficiency e Power. O seed só é copiado quando o arquivo persistente não existe. Depois disso, a interface do Agent Zero é a fonte de verdade da instalação.

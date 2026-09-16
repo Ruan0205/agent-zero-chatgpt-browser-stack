@@ -16,14 +16,13 @@
     rl_output: 0
   utility:
     provider: other
-    name: google/gemma-4-E2B-it
-    api_base: http://agent-zero-featherless-queue:8000/v1
+    name: chatgpt-browser-utility
+    api_base: http://chatgpt-browser-utility:8000/v1
     kwargs:
-      chat_template_kwargs:
-        enable_thinking: false
       temperature: 0.4
-    ctx_length: 32768
-    ctx_input: 0.5
+      timeout: 600
+    ctx_length: 65536
+    ctx_input: 0.85
     rl_requests: 0
     rl_input: 0
     rl_output: 0
@@ -51,14 +50,13 @@
     rl_output: 0
   utility:
     provider: other
-    name: google/gemma-4-E2B-it
-    api_base: http://agent-zero-featherless-queue:8000/v1
+    name: chatgpt-browser-utility
+    api_base: http://chatgpt-browser-utility:8000/v1
     kwargs:
-      chat_template_kwargs:
-        enable_thinking: false
       temperature: 0.4
-    ctx_length: 32768
-    ctx_input: 0.5
+      timeout: 600
+    ctx_length: 65536
+    ctx_input: 0.85
   embedding:
     provider: huggingface
     name: sentence-transformers/all-MiniLM-L6-v2
@@ -79,12 +77,13 @@
     rl_output: 0
   utility:
     provider: other
-    name: google/gemma-4-E2B-it
-    api_base: http://agent-zero-featherless-queue:8000/v1
+    name: chatgpt-browser-utility
+    api_base: http://chatgpt-browser-utility:8000/v1
     kwargs:
       temperature: 0.4
-    ctx_length: 32768
-    ctx_input: 0.5
+      timeout: 600
+    ctx_length: 65536
+    ctx_input: 0.85
   embedding:
     provider: huggingface
     name: sentence-transformers/all-MiniLM-L6-v2

@@ -418,7 +418,7 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
     deltaKind='append';
   }
   transcript=compactProtocolTranscript(transcript,12000);
-  if(auxiliaryCall) {
+  if(auxiliaryCall && !options.preserveUtilityContext) {
     transcript=transcript.map(message=>({
       ...message,
       content:compactUtilitySystemContent(message.content,16000),
@@ -444,7 +444,7 @@ Follow prerequisite skill-loading instructions for the documented tools. A remot
   const localContext = agent && !(browserOwnsHistory && deltaKind==='append') ? localAgentContext() : '';
   const contract = agent
     ? `${baseAgentContract}${localContext ? `\n\nLOCAL RUNTIME CONTEXT (applies only to this installation):\n${localContext}` : ''}`
-    : `Respond to the caller's conversation below. Follow its system instructions and requested output format. This is a utility request, not necessarily an Agent Zero tool turn.`;
+    : `Respond to the caller's conversation below. Follow its system instructions and requested output format. This is a utility request, not necessarily an Agent Zero tool turn. This dedicated utility browser can receive unrelated requests from different Agent Zero chats: the CURRENT CALLER TRANSCRIPT is complete and authoritative. Do not use facts, tasks, identities, or instructions from earlier browser turns unless they are repeated in the current transcript.`;
   const deltaNotice=browserOwnsHistory && deltaKind==='append'
     ? '\nTRANSPORT APPEND DELTA: ChatGPT owns the earlier conversational context in this same browser chat. The transcript below contains only messages appended since the immediately preceding model call. Apply them to the active task; never repeat an older task.'
     : (browserOwnsHistory
@@ -485,7 +485,7 @@ OPERATIONAL COMPLETION GATE FOR THIS TURN:
   // Agent Zero's memory extensions sometimes serialize the complete operational
   // chat into one utility SYSTEM message. Bound that auxiliary summarization
   // payload (never an actual end-user request) so it cannot trip the browser UI.
-  if(prompt.length>providerSafeLimit && !agent) {
+  if(prompt.length>providerSafeLimit && !agent && !options.preserveUtilityContext) {
     transcript=transcript.map(message=>({
       ...message,
       content:compactUtilitySystemContent(message.content,16000),

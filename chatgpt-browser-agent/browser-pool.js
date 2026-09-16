@@ -2,7 +2,7 @@
 
 class BrowserPool {
   constructor(options={}) {
-    this.minSize=Math.max(2,Number(options.minSize)||2);
+    this.minSize=Math.max(1,Number(options.minSize)||2);
     this.idleMs=Math.max(1_000,Number(options.idleMs)||1_800_000);
     this.onWarm=options.onWarm || (async()=>{});
     this.onStop=options.onStop || (async()=>{});
