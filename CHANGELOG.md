@@ -1,5 +1,14 @@
 # Changelog
 
+## Em desenvolvimento — três VNCs fixas e auditoria final
+
+- Três Chromes em displays/noVNC separados; chamadas excedentes ficam em fila, sem escala.
+- Mantém a afinidade persistente chat Agent Zero ↔ conversa web ↔ display e remapeia
+  atribuições legadas acima da terceira vaga.
+- Impõe cooldown global mínimo de 30 segundos após "too many requests".
+- Audita apenas envelopes finais `response` do Agent Zero, em display oculto;
+  chamadas de ferramentas e erros de transporte não iniciam auditoria.
+
 ## Em desenvolvimento — navegador Utility dedicado
 
 - Substitui Gemma como modelo auxiliar por uma instância Chrome/noVNC isolada na porta 50084.

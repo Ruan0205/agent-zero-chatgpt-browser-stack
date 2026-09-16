@@ -15,7 +15,8 @@ O repositório contém as customizações funcionais da instalação de origem, 
   condensa semanticamente históricos grandes antes da resposta auxiliar.
 - Uma conversa do navegador por chat do Agent Zero, evitando misturar contextos.
 - Envio enxuto ao navegador, reutilizando o contexto mantido pelo próprio ChatGPT.
-- Espera de até 130 segundos e duas tentativas adicionais para HTTP 429, com intervalo de 30 segundos.
+- Três Chromes simultâneos, cada um em seu próprio display/noVNC; a quarta chamada aguarda numa fila, sem criar outro navegador.
+- Após "too many requests", todas as novas submissões desse gateway aguardam pelo menos 30 segundos; há até duas retentativas no mesmo chat.
 - Chromium visível por noVNC e painel integrado no Agent Zero.
 - VS Code/code-server por chat, executor autenticado e acesso ao Docker do host.
 - Proteções contra repetição de respostas e contra memorização que trava o fluxo.
@@ -34,7 +35,9 @@ Navegador do usuário
   │    ├─ ferramenta VS Code ──> code-server + executor
   │    ├─ WhatsApp self-chat ──> bridge interno persistente
   │    └─ ferramenta de imagem > meta-ai-whatsapp ──> Meta AI no WhatsApp
-  ├─ :50081  noVNC / Chrome do ChatGPT Browser
+  ├─ :50081  noVNC / Chrome principal 1
+  ├─ :50083  noVNC / Chrome principal 2
+  ├─ :50085  noVNC / Chrome principal 3
   ├─ :50084  noVNC / Chrome auxiliar dedicado
   └─ :50082  VS Code web
 
@@ -97,11 +100,15 @@ Substitua `HOST` pelo IP ou DNS do servidor:
 | Componente | Endereço | Autenticação |
 |---|---|---|
 | Agent Zero | `http://HOST:50080/` | `AUTH_LOGIN` / `AUTH_PASSWORD` |
-| ChatGPT Browser | `http://HOST:50081/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
+| ChatGPT Browser 1 | `http://HOST:50081/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
+| ChatGPT Browser 2 | `http://HOST:50083/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
+| ChatGPT Browser 3 | `http://HOST:50085/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
 | ChatGPT Utility | `http://HOST:50084/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
 | VS Code | `http://HOST:50082/` | integrado à stack |
 
 O ícone **ChatGPT Browser (VNC)** dentro do Agent Zero abre a mesma tela `:50081/vnc.html` e injeta a senha automaticamente apenas depois do login no Agent Zero.
+As outras duas telas são acessíveis diretamente nas portas 50083 e 50085. O gateway mantém
+o mapa entre chat Agent Zero, conversa web e display; pedidos adicionais aguardam o display atribuído.
 
 ### 1. Entrar no ChatGPT Browser
 
@@ -218,7 +225,11 @@ set -a; . ./.env; set +a
 
 ### HTTP 429 / rate limit
 
-O gateway espera 30 segundos e tenta novamente até duas vezes. A fila Featherless aceita somente uma chamada upstream por vez. Se o provedor continuar rejeitando, aguarde a janela de limite; criar mais containers não aumenta a cota.
+O gateway bloqueia novas submissões por pelo menos 30 segundos após "too many requests"
+e tenta novamente até duas vezes no mesmo chat. As três VNCs e a instância Utility
+compartilham esse bloqueio da conta.
+A fila Featherless aceita somente uma chamada upstream por vez. Se o provedor continuar
+rejeitando, aguarde a janela de limite; criar mais containers não aumenta a cota.
 
 ### `The message you submitted was too long`
 
@@ -306,14 +317,16 @@ B. Modelos: Default Qwen/Featherless, Efficiency, Utility e Power chatgpt-browse
    nunca abre ChatGPT como modelo principal, que Power cria um chat web próprio por chat
    Agent Zero e que Utility usa somente a VNC auxiliar. Envie ao Utility um histórico
    sintético maior que 32 mil tokens e confirme compactação sem corte de trechos.
-C. Browser pool: duas conversas simultâneas em instâncias distintas; terceira demanda
-   cria instância temporária; afinidade Agent-Zero-chat ↔ ChatGPT-chat; ociosa por 30 min;
+C. Browser pool: três conversas simultâneas em três VNCs distintas; quarta demanda
+   aguarda na fila, sem escala; afinidade Agent-Zero-chat ↔ ChatGPT-chat ↔ VNC;
    popup; timeout; página travada; um 429 e duas retentativas com 30 s; keep-alive de
    operação lenta; sem refresh a cada mensagem; sem chat cruzado ou loop.
 D. Ferramentas: terminal dentro do container; terminal root no host apenas quando pedido;
    Docker; navegador do Agent Zero; desktop; VS Code por chat; criar/editar/salvar arquivo;
    executar comando; criar Docker Hello World; abrir no navegador; Git init/commit; remover
    somente o projeto de teste; VNC integrado; painel de incidentes; ligar/desligar auditor.
+   Confirme que só uma resposta final `response` inicia auditoria; chamadas intermediárias
+   de ferramenta e erros de transporte não a iniciam.
 E. Imagens: no Power, enviar PNG/JPG/WebP junto do prompt, analisar, gerar uma e várias
    imagens, editar imagem anterior e devolver inline. No Qwen, testar a ferramenta Meta AI
    somente se o usuário a pareou; sem pareamento deve falhar de forma clara e limitada.
@@ -386,9 +399,10 @@ B. Modelos: Default Qwen/Featherless, Efficiency, Utility e Power chatgpt-browse
    curta, longa, português, ferramenta, erro, continuação e chat novo. Sem mistura de
    contextos ou chamada do navegador pelo Qwen como modelo principal. Teste uma chamada
    Utility grande para confirmar compactação sem corte e a VNC auxiliar na porta 50084.
-C. Pool web: duas instâncias permanentes simultâneas, terceira elástica, afinidade correta,
-   expiração em 30 min, popup, timeout, erro visual, keep-alive, 429 com espera de 30 s e
-   duas tentativas, nenhuma atualização desnecessária e nenhum loop.
+C. Pool web: três instâncias permanentes simultâneas, cada uma em VNC separada; quarta
+   chamada na fila, sem escala; afinidade correta, popup, timeout, erro visual, keep-alive,
+   429 com espera global mínima de 30 s e duas tentativas, nenhuma atualização
+   desnecessária e nenhum loop. Confirme auditoria apenas das respostas finais.
 D. Ferramentas: terminal Agent Zero, host root somente sob pedido, Docker, browser, desktop,
    VS Code individual, editar/executar, Hello World Docker, abrir no browser, Git commit,
    VNC, downloads, painel/auditoria de incidentes e limpeza do projeto de teste.

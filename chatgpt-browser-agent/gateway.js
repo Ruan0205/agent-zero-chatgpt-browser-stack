@@ -8,6 +8,8 @@ const { spawn } = require('child_process');
 const bridge = require('./bridge-core');
 const { BrowserPool } = require('./browser-pool');
 const { IncidentAuditor } = require('./incident-auditor');
+const { finalResponseText } = require('./audit-eligibility');
+const { ProviderCooldown } = require('./provider-cooldown');
 const { compactUtilityBody } = require('./utility-compactor');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8000);
@@ -25,8 +27,9 @@ const IDLE_RECYCLE_MS = Number(process.env.IDLE_RECYCLE_MS || 60000);
 const REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || 130000);
 const MEDIA_REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_MEDIA_TIMEOUT_MS || 330000);
 const PROVIDER_429_RETRIES = Math.max(0, Number(process.env.PROVIDER_429_RETRIES || 2));
-const PROVIDER_429_RETRY_DELAY_MS = Math.max(0, Number(process.env.PROVIDER_429_RETRY_DELAY_MS || 30000));
+const PROVIDER_429_RETRY_DELAY_MS = Math.max(30000, Number(process.env.PROVIDER_429_RETRY_DELAY_MS || 30000));
 const BROWSER_POOL_MIN = Math.max(1, Number(process.env.BROWSER_POOL_MIN || 2));
+const BROWSER_POOL_MAX = Math.max(BROWSER_POOL_MIN,Number(process.env.BROWSER_POOL_MAX || 3));
 const UTILITY_SINGLE_CHAT = process.env.UTILITY_SINGLE_CHAT === 'true';
 const BROWSER_POOL_IDLE_MS = Math.max(1_000, Number(process.env.BROWSER_POOL_IDLE_MS || 1_800_000));
 const BROWSER_POOL_DIR = process.env.BROWSER_POOL_DIR || path.join(STATE_DIR, 'browser-pool');
@@ -44,6 +47,10 @@ const ARTIFACT_EXTENSION_PATTERN='(?:tar\\.gz|png|jpe?g|webp|gif|pdf|docx?|xlsx?
 // receives the real multipart upload and exposes its original path to tools;
 // only the unreliable duplicate upload into the browser UI is suppressed.
 const BROWSER_UI_UPLOAD_BLOCKED_EXTENSIONS=new Set(['.xls']);
+const providerCooldown=new ProviderCooldown({
+  delayMs:PROVIDER_429_RETRY_DELAY_MS,
+  directory:process.env.PROVIDER_429_COOLDOWN_DIR || '',
+});
 
 function loadJsonFile(file,fallback={}) {
   try { return JSON.parse(fs.readFileSync(file,'utf8')); }
@@ -64,10 +71,6 @@ function saveChatMap(map) {
   saveJsonFile(CHATMAP_FILE,map);
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 function isProviderMessageLimit(error) {
   return /Messages limit reached|reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations|provider_message_limit/i.test(String(error?.message || error || ''));
 }
@@ -83,6 +86,12 @@ function latestSessionChatUrl(slot) {
   } catch {
     return null;
   }
+}
+
+function displayForSlot(slot) {
+  const number=Number(String(slot.id).match(/^browser-(\d+)$/)?.[1]);
+  if(!Number.isInteger(number) || number<1 || number>3) throw new Error(`Invalid browser display slot: ${slot.id}`);
+  return `:${98+number}`;
 }
 
 function conversationKey(req) {
@@ -139,6 +148,7 @@ async function prepareInstanceState(slot) {
 async function warmBrowserInstance(slot) {
   await prepareInstanceState(slot);
   await runProcess(process.execPath,[SCRIPT,'--warm'],{
+    DISPLAY:displayForSlot(slot),
     CHATGPT_BROWSER_STATE_DIR:slot.stateDir,
     CHATGPT_BROWSER_OUTBOX_DIR:path.join(STATE_DIR,'outbox'),
   },120_000);
@@ -148,6 +158,7 @@ async function warmBrowserInstance(slot) {
 async function checkBrowserInstance(slot) {
   if(!slot.stateDir) slot.stateDir=path.join(BROWSER_POOL_DIR,slot.id);
   await runProcess(process.execPath,[SCRIPT,'--warm'],{
+    DISPLAY:displayForSlot(slot),
     CHATGPT_BROWSER_STATE_DIR:slot.stateDir,
     CHATGPT_BROWSER_OUTBOX_DIR:path.join(STATE_DIR,'outbox'),
   },120_000);
@@ -156,6 +167,7 @@ async function checkBrowserInstance(slot) {
 async function stopBrowserInstance(slot) {
   if(!slot.stateDir) slot.stateDir=path.join(BROWSER_POOL_DIR,slot.id);
   await runProcess(process.execPath,[SCRIPT,'--stop'],{
+    DISPLAY:displayForSlot(slot),
     CHATGPT_BROWSER_STATE_DIR:slot.stateDir,
     CHATGPT_BROWSER_OUTBOX_DIR:path.join(STATE_DIR,'outbox'),
   },30_000).catch(error=>console.warn(`[pool] stop ${slot.id}: ${error.message}`));
@@ -180,6 +192,7 @@ async function notifyScale({slot,metadata,message}) {
 
 const pool=new BrowserPool({
   minSize:BROWSER_POOL_MIN,
+  maxSize:BROWSER_POOL_MAX,
   idleMs:BROWSER_POOL_IDLE_MS,
   onWarm:warmBrowserInstance,
   onStop:stopBrowserInstance,
@@ -193,6 +206,7 @@ const auditor=new IncidentAuditor({
   script:SCRIPT,
   stateRoot:INCIDENTS_DIR,
   profileTemplate:PROFILE_TEMPLATE,
+  display:process.env.AUDITOR_DISPLAY || process.env.DISPLAY || ':99',
 });
 
 function safeChatName(contextId) {
@@ -204,25 +218,6 @@ function safeChatName(contextId) {
 function latestQuestion(body) {
   const message=[...(body?.messages||[])].reverse().find(item=>item.role==='user' && bridge.isCurrentUserMessage(item));
   return message ? bridge.extractedUserText(bridge.textContent(message.content)) : '';
-}
-
-function isAuditableFinalAnswer(answer) {
-  try {
-    const parsed=JSON.parse(answer);
-    return parsed?.tool_name==='response';
-  } catch {
-    // An unparseable successful answer is itself worth auditing. Explicit
-    // non-final tool envelopes are valid JSON and are excluded above.
-    return true;
-  }
-}
-
-function userVisibleFinalAnswer(answer) {
-  try {
-    const parsed=JSON.parse(answer);
-    if(parsed?.tool_name==='response' && typeof parsed?.tool_args?.text==='string') return parsed.tool_args.text;
-  } catch {}
-  return String(answer||'');
 }
 
 function enqueueAudit({contextId,callScope,question,response='',error='',events=[],httpStatus=null}) {
@@ -390,7 +385,8 @@ function nativeMediaPrompt(body) {
   return `Handle the following latest Agent Zero user request directly. You may use ChatGPT's native image/file analysis, image generation, or image editing as appropriate. Never use Meta AI. Any user attachments are uploaded with this prompt. Preserve the user's exact requested content and number of outputs. Save every requested output under /mnt/data using the exact requested filename. Your final response MUST expose every output as a real clickable Markdown sandbox link in the form [Download filename](sandbox:/mnt/data/filename); a plain /mnt/data path, a citation without a download link, source code, or a claim that the file was attached is not sufficient. After those clickable links, add only one short completion sentence.\n\nUSER REQUEST:\n${text}`;
 }
 
-function runBrowser(slot, prompt, chatUrl, options={}) {
+async function runBrowser(slot, prompt, chatUrl, options={}) {
+  await providerCooldown.wait();
   return new Promise((resolve, reject) => {
     const timeoutMs=Math.max(1_000,Number(options.timeoutMs)||REQUEST_TIMEOUT_MS);
     let contextFile=null;
@@ -414,6 +410,7 @@ function runBrowser(slot, prompt, chatUrl, options={}) {
       cwd: __dirname,
       env: {
         ...process.env,
+        DISPLAY:displayForSlot(slot),
         CHATGPT_BROWSER_STATE_DIR: slot.stateDir,
         CHATGPT_BROWSER_OUTBOX_DIR: path.join(STATE_DIR, 'outbox'),
         BROWSER_RECOVERY_RELOAD: options.reloadBeforeAttempt ? '1' : '0',
@@ -441,6 +438,7 @@ function runBrowser(slot, prompt, chatUrl, options={}) {
       cleanup();
       if (code !== 0) {
         const message=(stderr || stdout || `process exited ${code}`).trim();
+        if(isProviderMessageLimit(message)) providerCooldown.block();
         const limit=message.match(/UPLOAD_RATE_LIMIT retry_after_seconds=(\d+)/);
         if(limit) fs.writeFileSync(UPLOAD_COOLDOWN_FILE,JSON.stringify({until:Date.now()+Number(limit[1])*1000}),{mode:0o600});
         return reject(new Error(message));
@@ -596,7 +594,7 @@ const server = http.createServer(async (req, res) => {
                 if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl(slot);
                 if(!chatUrl) throw new Error('Utility 429 recovery refused: the dedicated chat URL is unknown');
                 console.warn(`[utility-compaction] provider 429; retry ${attempt+1}/${PROVIDER_429_RETRIES} after ${PROVIDER_429_RETRY_DELAY_MS}ms`);
-                await sleep(PROVIDER_429_RETRY_DELAY_MS);
+                await providerCooldown.wait();
               }
             }
             if(!chatUrl) {
@@ -675,7 +673,7 @@ const server = http.createServer(async (req, res) => {
             if(!chatUrl) throw new Error('Provider 429 retry refused: the current ChatGPT chat URL is unknown');
             console.warn(`[provider-429] attempt ${rateAttempt+1}/${PROVIDER_429_RETRIES} failed; waiting ${PROVIDER_429_RETRY_DELAY_MS}ms, then reloading the same chat and retrying`);
             auditEvents.push(`O provedor retornou limite de mensagens; retentativa ${rateAttempt+1}/${PROVIDER_429_RETRIES} após ${PROVIDER_429_RETRY_DELAY_MS} ms.`);
-            await sleep(PROVIDER_429_RETRY_DELAY_MS);
+            await providerCooldown.wait();
           }
         }
         if (!chatUrl && chatHash) {
@@ -733,11 +731,12 @@ const server = http.createServer(async (req, res) => {
           const result=bridge.validateAnswer(retry.raw, requestBody,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
         }
       });
-      if(isAuditableFinalAnswer(answer)) enqueueAudit({
+      const finalText=finalResponseText(answer);
+      if(finalText!==null) enqueueAudit({
         contextId:auditContextId,
         callScope:auditCallScope,
         question:auditQuestion,
-        response:userVisibleFinalAnswer(answer),
+        response:finalText,
         events:auditEvents,
         httpStatus:200,
       });
@@ -747,26 +746,21 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       if(streamHeartbeat) { clearInterval(streamHeartbeat); streamHeartbeat=null; }
       if(res.headersSent) {
-        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:auditEvents,httpStatus:500});
         return streamError(res,error);
       }
       const rate=error.message.match(/UPLOAD_RATE_LIMIT retry_after_seconds=(\d+)/);
       if(rate) {
-        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A requisição terminou em HTTP 429.'],httpStatus:429});
         res.setHeader('Retry-After',rate[1]);
         return json(res,429,{error:{message:error.message,type:'rate_limit_error'}});
       }
       if (/Messages limit reached|reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations/i.test(error.message)) {
-        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A conta ChatGPT atingiu o limite do provedor após as retentativas configuradas.'],httpStatus:429});
         res.setHeader('Retry-After','14400');
         return json(res,429,{error:{message:'A conta ChatGPT conectada atingiu o limite de mensagens do provedor. Nenhuma mensagem foi enviada; tente novamente após o horário de reset exibido no navegador.',type:'rate_limit_error',code:'provider_message_limit'}});
       }
       if (/message you submitted was too long|Context exceeds browser bridge limit/i.test(error.message))
       {
-        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A requisição excedeu o contexto aceito pelo bridge.'],httpStatus:400});
         return json(res,400,{error:{message:'Context too large. Compact this conversation before retrying. No tool was executed by this request.',type:'invalid_request_error',code:'context_length_exceeded'}});
       }
-      enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A requisição terminou em erro do browser bridge.'],httpStatus:502});
       return json(res, 502, {error:{message:error.message, type:'browser_agent_error'}});
     }
   }

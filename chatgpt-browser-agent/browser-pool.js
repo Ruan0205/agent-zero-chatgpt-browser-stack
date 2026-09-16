@@ -3,6 +3,8 @@
 class BrowserPool {
   constructor(options={}) {
     this.minSize=Math.max(1,Number(options.minSize)||2);
+    this.maxSize=Number.isFinite(Number(options.maxSize)) && Number(options.maxSize)>0
+      ? Math.max(this.minSize,Math.floor(Number(options.maxSize))) : Number.POSITIVE_INFINITY;
     this.idleMs=Math.max(1_000,Number(options.idleMs)||1_800_000);
     this.onWarm=options.onWarm || (async()=>{});
     this.onStop=options.onStop || (async()=>{});
@@ -11,6 +13,17 @@ class BrowserPool {
     this.loadAssignments=options.loadAssignments || (()=>({}));
     this.saveAssignments=options.saveAssignments || (()=>{});
     this.assignments={...this.loadAssignments()};
+    if(Number.isFinite(this.maxSize)) {
+      let changed=false;
+      for(const [key,id] of Object.entries(this.assignments)) {
+        if(this._numberFromId(id)>0 && this._numberFromId(id)<=this.maxSize) continue;
+        let hash=2166136261;
+        for(const char of key) hash=Math.imul(hash^char.charCodeAt(0),16777619)>>>0;
+        this.assignments[key]=this._slotId(1+(hash%this.maxSize));
+        changed=true;
+      }
+      if(changed) this.saveAssignments(this.assignments);
+    }
     this.slots=new Map();
     this.nextId=1;
     this.watchdog=null;
@@ -115,6 +128,7 @@ class BrowserPool {
   }
 
   _newDynamicSlot() {
+    if(Number.isFinite(this.maxSize)) throw new Error('Fixed browser pool cannot create a dynamic slot');
     while(this.slots.has(this._slotId(this.nextId))) this.nextId+=1;
     return this._ensureSlot(this._slotId(this.nextId++),false);
   }
@@ -126,9 +140,11 @@ class BrowserPool {
 
     let scaled=false;
     if(!slot) {
-      const candidate=this._leastLoadedReadySlot();
+      const candidate=this._leastLoadedReadySlot() || (Number.isFinite(this.maxSize)
+        ? [...this.slots.values()].sort((a,b)=>a.queued-b.queued || this._numberFromId(a.id)-this._numberFromId(b.id))[0]
+        : null);
       const candidateLoad=candidate ? (candidate.busy?1:0)+candidate.queued : Number.POSITIVE_INFINITY;
-      if(candidate && candidateLoad===0) slot=candidate;
+      if(candidate && (candidateLoad===0 || Number.isFinite(this.maxSize))) slot=candidate;
       else {
         const reusable=[...this.slots.values()]
           .filter(item=>!item.permanent && item.state==='stopped' && !item.busy && item.queued===0)

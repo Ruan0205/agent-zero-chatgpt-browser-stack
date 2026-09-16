@@ -12,15 +12,31 @@ O Agent Zero chama `http://agent-zero-featherless-queue:8000/v1`. O proxy FastAP
 
 ### ChatGPT Browser
 
-O serviço executa Google Chrome em Xvfb, com fluxbox e x11vnc. websockify/noVNC publica a tela em 6080 no container e 50081 no host. Um gateway OpenAI-compatible fica apenas na rede Docker, na porta 8000.
+O serviço executa três desktops Xvfb separados (:99, :100 e :101), cada um com
+fluxbox, x11vnc e websockify/noVNC próprios. As telas são publicadas nas portas
+50081, 50083 e 50085 do host. O gateway OpenAI-compatible fica apenas na rede
+Docker, na porta 8000. O auditor usa um quarto display oculto (:102), sem VNC,
+somente quando há resposta final para avaliar.
 
 O adaptador converte mensagens do Agent Zero em uma instrução compacta para o ChatGPT, exige uma resposta estruturada e a devolve como streaming OpenAI-compatible. O plugin `browser_session_bridge` acrescenta um identificador derivado do chat atual, permitindo uma conversa web independente para cada chat do Agent Zero.
 
-O gateway inicia duas instâncias permanentes. Cada chat do Agent Zero permanece associado à sua própria URL e instância; demandas adicionais criam instâncias elásticas que só expiram após 30 minutos sem uso. Antes de cada envio o pool confirma a afinidade, impedindo que uma mensagem seja publicada na conversa web errada.
+O gateway inicia três instâncias permanentes e nunca escala acima disso. Cada
+chat do Agent Zero permanece associado à sua URL web e a um dos três displays;
+chamadas simultâneas adicionais aguardam na fila do display atribuído. O mapa
+persistente de chats permanece no gateway, inclusive quando atribuições antigas
+de instâncias elásticas são remapeadas para as três vagas fixas. Cada vaga
+serializa seus envios para não misturar nem duplicar respostas.
 
 O contexto longo é mantido pelo próprio ChatGPT. O Agent Zero envia somente o delta necessário, o contrato de ferramentas e a solicitação atual. A página não é atualizada a cada mensagem: há reload na criação/recuperação, duas novas tentativas após 429 com espera de 30 segundos e keep-alive SSE enquanto operações longas são processadas. Artefatos são capturados da resposta HTTP autenticada disparada pelo controle exato daquela resposta e gravados no outbox compartilhado, mesmo quando a UI omite parâmetros opcionais do nome do download.
+Marcadores de cooldown em `data/browser/provider-cooldown` são lidos tanto pelo
+gateway principal quanto pelo Utility; depois de uma rejeição por excesso de
+requisições, qualquer novo envio desses serviços aguarda pelo menos 30 segundos.
 
-O perfil Chrome, cookies, mapa chat↔URL, pool, outbox e incidentes ficam sob `data/browser`. O auditor opcional usa uma conversa temporária não listada para classificar a resposta final, evita auditar a si próprio e remove a conversa temporária ao terminar.
+O perfil Chrome, cookies, mapa chat↔URL, pool, outbox e incidentes ficam sob
+`data/browser`. O auditor opcional recebe somente envelopes finais `response`
+entregues ao Agent Zero — não chamadas de ferramenta, respostas intermediárias
+nem erros HTTP. Usa uma conversa temporária não listada, evita auditar a si
+próprio e remove a conversa temporária ao terminar.
 
 ### ChatGPT Browser Utility
 

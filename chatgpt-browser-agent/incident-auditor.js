@@ -84,6 +84,7 @@ class IncidentAuditor {
     this.script=options.script;
     this.stateRoot=options.stateRoot;
     this.profileTemplate=options.profileTemplate;
+    this.display=options.display || process.env.DISPLAY || ':99';
     this.stateDir=path.join(this.stateRoot,'auditor-state');
     this.settingsFile=path.join(this.stateRoot,'settings.json');
     this.incidentsFile=path.join(this.stateRoot,'incidents.json');
@@ -194,6 +195,7 @@ ${JSON.stringify({
     await this._prepare();
     const responseFile=path.join(this.stateDir,`audit-${crypto.randomUUID()}.json`);
     const env={
+      DISPLAY:this.display,
       CHATGPT_BROWSER_STATE_DIR:this.stateDir,
       BROWSER_REQUEST_TIMEOUT_MS:'240000',
     };

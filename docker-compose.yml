@@ -85,9 +85,13 @@ services:
       BROWSER_REQUEST_TIMEOUT_MS: "130000"
       PROVIDER_429_RETRIES: "2"
       PROVIDER_429_RETRY_DELAY_MS: "30000"
+      PROVIDER_429_COOLDOWN_DIR: /data/provider-cooldown
       IDLE_RECYCLE_MS: "0"
       BROWSER_MEDIA_TIMEOUT_MS: "420000"
-      BROWSER_POOL_MIN: "2"
+      BROWSER_POOL_MIN: "3"
+      BROWSER_POOL_MAX: "3"
+      BROWSER_DISPLAY_COUNT: "3"
+      AUDITOR_DISPLAY: ":102"
       BROWSER_POOL_IDLE_MS: "1800000"
       BROWSER_INCIDENTS_DIR: /data/incidents
       AGENT_ZERO_NOTICE_URL: http://agent-zero/api/browser_pool_notice
@@ -98,6 +102,8 @@ services:
     working_dir: /workspace
     ports:
       - "${CHATGPT_VNC_PORT:-50081}:6080"
+      - "${CHATGPT_VNC_2_PORT:-50083}:6081"
+      - "${CHATGPT_VNC_3_PORT:-50085}:6082"
     networks: [ai-shared]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
@@ -120,14 +126,18 @@ services:
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
       MODEL_ID: chatgpt-browser-utility
       BROWSER_POOL_MIN: "1"
+      BROWSER_POOL_MAX: "1"
+      BROWSER_DISPLAY_COUNT: "1"
       BROWSER_OWNS_HISTORY: "false"
       UTILITY_SINGLE_CHAT: "true"
       BROWSER_REQUEST_TIMEOUT_MS: "180000"
       PROVIDER_429_RETRIES: "2"
       PROVIDER_429_RETRY_DELAY_MS: "30000"
+      PROVIDER_429_COOLDOWN_DIR: /provider-cooldown
     volumes:
       - ${STACK_DATA_DIR:-./data}/browser-utility:/data
       - ${STACK_DATA_DIR:-./data}/browser:/template:ro
+      - ${STACK_DATA_DIR:-./data}/browser/provider-cooldown:/provider-cooldown
     ports:
       - "${CHATGPT_UTILITY_VNC_PORT:-50084}:6080"
     networks: [ai-shared]
