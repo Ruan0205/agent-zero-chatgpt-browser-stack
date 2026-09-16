@@ -86,6 +86,12 @@ services:
       PROVIDER_429_RETRIES: "2"
       PROVIDER_429_RETRY_DELAY_MS: "30000"
       IDLE_RECYCLE_MS: "0"
+      BROWSER_MEDIA_TIMEOUT_MS: "420000"
+      BROWSER_POOL_MIN: "2"
+      BROWSER_POOL_IDLE_MS: "1800000"
+      BROWSER_INCIDENTS_DIR: /data/incidents
+      AGENT_ZERO_NOTICE_URL: http://agent-zero/api/browser_pool_notice
+      AGENT_ZERO_NOTICE_TOKEN: ${BROWSER_POOL_NOTICE_TOKEN:?configure BROWSER_POOL_NOTICE_TOKEN in .env}
     volumes:
       - ${STACK_DATA_DIR:-./data}/browser:/data
       - ${STACK_DATA_DIR:-./data}/browser-workspace:/workspace
@@ -101,7 +107,10 @@ services:
       start_period: 20s
 
   agent-zero:
-    image: ${AGENT_ZERO_IMAGE:-agent0ai/agent-zero@sha256:a38802ee1ddb83747836521931a99b8f6af000c586e1176478c533dcb08de8c4}
+    build:
+      context: ./agent-zero
+      dockerfile: Dockerfile.agent-zero
+    image: ${AGENT_ZERO_IMAGE:-agent-zero-browser-stack-agent-zero:v2.12}
     container_name: agent-zero
     restart: unless-stopped
     user: root
@@ -122,6 +131,9 @@ services:
       A0_SET_max_consecutive_unusable_responses: "3"
       A0_SET_timezone: ${TZ:-America/Sao_Paulo}
       VSCODE_EXEC_TOKEN: ${VSCODE_EXEC_TOKEN:?configure VSCODE_EXEC_TOKEN in .env}
+      BROWSER_POOL_NOTICE_TOKEN: ${BROWSER_POOL_NOTICE_TOKEN:?configure BROWSER_POOL_NOTICE_TOKEN in .env}
+      BROWSER_INCIDENTS_DIR: /a0/usr/browser-incidents
+      META_AI_WHATSAPP_URL: http://meta-ai-whatsapp:8788
     ports:
       - "${AGENT_ZERO_PORT:-50080}:80"
       - "${AGENT_ZERO_SSH_PORT:-50022}:22"
@@ -132,7 +144,11 @@ services:
       - ./agent-zero/overrides/_50_memorize_fragments.py:/a0/plugins/_memory/extensions/python/monologue_end/_50_memorize_fragments.py:ro
       - ./agent-zero/overrides/_51_memorize_solutions.py:/a0/plugins/_memory/extensions/python/monologue_end/_51_memorize_solutions.py:ro
       - ./agent-zero/overrides/_30_repeat_response.py:/a0/extensions/python/message_loop_result/_30_repeat_response.py:ro
+      - ./agent-zero/overrides/_90_organize_history_wait.py:/a0/extensions/python/message_loop_prompts_before/_90_organize_history_wait.py:ro
+      - ./agent-zero/overrides/agent.system.solutions.md:/a0/plugins/_memory/prompts/agent.system.solutions.md:ro
       - ./agent-zero/overrides/fw.msg_repeat.md:/a0/prompts/fw.msg_repeat.md:ro
+      - ./agent-zero/overrides/download_work_dir_file.py:/a0/api/download_work_dir_file.py:ro
+      - ./agent-zero/overrides/browser_pool_notice.py:/a0/api/browser_pool_notice.py:ro
       - ./agent-zero/overrides/whatsapp_handler_secure.py:/a0/plugins/_whatsapp_integration/helpers/handler.py:ro
       - ./agent-zero/overrides/wa_response_attachments.py:/a0/plugins/_whatsapp_integration/extensions/python/tool_execute_after/_50_wa_response.py:ro
       - ./agent-zero/overrides/wa_reply_attachments.py:/a0/plugins/_whatsapp_integration/extensions/python/process_chain_end/_55_wa_reply.py:ro
@@ -141,7 +157,11 @@ services:
       - ./agent-zero/meta-ai-image-plugin:/a0/plugins/_meta_ai_image:ro
       - ./agent-zero/vscode-plugin:/a0/plugins/_vscode:ro
       - ./agent-zero/agent-monitor-plugin:/a0/plugins/_agent_monitor:ro
+      - ./agent-zero/browser-incidents-plugin:/a0/plugins/_browser_incidents:ro
+      - ./agent-zero/chatgpt-browser-media-plugin:/a0/plugins/_chatgpt_browser_media:ro
       - ${STACK_DATA_DIR:-./data}/agent-monitor/vnc-runtime.json:/a0/plugins/_agent_monitor/webui/vnc-runtime.json:ro
+      - ${STACK_DATA_DIR:-./data}/browser/outbox:/a0/usr/browser-media:ro
+      - ${STACK_DATA_DIR:-./data}/browser/incidents:/a0/usr/browser-incidents:rw
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HOST_ROOT_MOUNT:-/}:/host:rw
       - ${STACK_DATA_DIR:-./data}/workspace:/workspace:rw

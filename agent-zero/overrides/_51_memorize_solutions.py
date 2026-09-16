@@ -130,7 +130,10 @@ class MemorizeSolutions(Extension):
                     # If solution is not a dict, convert it to string
                     txt = f"# Solution\n {str(solution)}"
 
-                if set["memory_memorize_consolidation"]:
+                # Intelligent consolidation performs additional LLM calls and
+                # can hold chat finalization for minutes. Keep durable memory,
+                # but use the deterministic vector-DB insert/replace path.
+                if False:
                     try:
                         # Use intelligent consolidation system
                         from plugins._memory.helpers.memory_consolidation import create_memory_consolidator
@@ -138,7 +141,11 @@ class MemorizeSolutions(Extension):
                             self.agent,
                             similarity_threshold=DEFAULT_MEMORY_THRESHOLD,  # More permissive for discovery
                             max_similar_memories=6,    # Fewer for solutions (more complex)
-                            max_llm_context_memories=3
+                            max_llm_context_memories=3,
+                            # Background consolidation shares finite provider
+                            # capacity with the active agent turn. Sixty seconds
+                            # expired routinely while that turn was still busy.
+                            processing_timeout_seconds=180,
                         )
 
                         # Create solution-specific log for detailed tracking

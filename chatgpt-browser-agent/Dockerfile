@@ -10,7 +10,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY chatgpt.js gateway.js bridge-core.js mcp-server.js agent.js ./
+COPY chatgpt.js gateway.js browser-pool.js bridge-core.js incident-auditor.js mcp-server.js agent.js ./
 COPY entrypoint.sh /usr/local/bin/browser-agent-entrypoint
 COPY manual-login.sh /usr/local/bin/chatgpt-manual-login
 RUN chmod 0755 /usr/local/bin/browser-agent-entrypoint /usr/local/bin/chatgpt-manual-login \

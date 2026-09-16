@@ -234,9 +234,117 @@ func looksTruncated(s string) bool {
 type bridge struct {
 	client *whatsmeow.Client
 	// One WhatsApp thread means one in-flight question; a global lock is the whole story.
-	sendMu  sync.Mutex
-	active  *collector
-	activeM sync.RWMutex
+	sendMu      sync.Mutex
+	active      *collector
+	activeM     sync.RWMutex
+	pairMu      sync.Mutex
+	pairCode    string
+	pairPhone   string
+	pairError   string
+	pairCreated time.Time
+}
+
+func digitsOnly(value string) string {
+	var out strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+func (b *bridge) pairingSnapshot() map[string]any {
+	b.pairMu.Lock()
+	defer b.pairMu.Unlock()
+	linked := b.client.Store.ID != nil
+	if linked {
+		b.pairCode, b.pairError = "", ""
+	}
+	expiresAt := ""
+	if !b.pairCreated.IsZero() && b.pairCode != "" {
+		expiresAt = b.pairCreated.Add(5 * time.Minute).UTC().Format(time.RFC3339)
+	}
+	return map[string]any{
+		"success":   true,
+		"linked":    linked,
+		"connected": b.client.IsConnected(),
+		"logged_in": b.client.IsLoggedIn(),
+		"phone":     b.pairPhone,
+		"code":      b.pairCode,
+		"error":     b.pairError,
+		"created_at": func() string {
+			if b.pairCreated.IsZero() {
+				return ""
+			}
+			return b.pairCreated.UTC().Format(time.RFC3339)
+		}(),
+		"expires_at": expiresAt,
+	}
+}
+
+func (b *bridge) servePairStatus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(b.pairingSnapshot())
+}
+
+func (b *bridge) servePairStart(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "POST required"})
+		return
+	}
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	phone := digitsOnly(firstNonEmpty(body.Phone, os.Getenv("WA_PHONE")))
+	if len(phone) < 8 || len(phone) > 15 {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "Informe o número com DDI e DDD, somente dígitos."})
+		return
+	}
+
+	b.pairMu.Lock()
+	defer b.pairMu.Unlock()
+	if b.client.Store.ID != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "linked": true, "message": "WhatsApp já está conectado."})
+		return
+	}
+	if !b.client.IsConnected() {
+		qrChan, err := b.client.GetQRChannel(r.Context())
+		if err != nil {
+			b.pairError = err.Error()
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": b.pairError})
+			return
+		}
+		if err := b.client.Connect(); err != nil {
+			b.pairError = err.Error()
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": b.pairError})
+			return
+		}
+		go func() {
+			for range qrChan {
+			}
+		}()
+	}
+	code, err := b.client.PairPhone(r.Context(), phone, true, whatsmeow.PairClientChrome, "Chrome (MacOS)")
+	if err != nil {
+		b.pairError = err.Error()
+		b.pairCode = ""
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": b.pairError})
+		return
+	}
+	b.pairPhone, b.pairCode, b.pairError, b.pairCreated = phone, code, "", time.Now()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true, "linked": false, "phone": phone, "code": code,
+		"created_at": b.pairCreated.UTC().Format(time.RFC3339),
+		"expires_at": b.pairCreated.Add(5 * time.Minute).UTC().Format(time.RFC3339),
+	})
 }
 
 func (b *bridge) handle(raw any) {
@@ -416,7 +524,7 @@ func (b *bridge) askImage(ctx context.Context, prompt string, sourceFilename str
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(prompt)))
 	markerPath := path.Join(uploadDir, ".meta-ai-outbound-"+digest+".json")
 	marker, _ := json.Marshal(map[string]any{
-		"prompt": prompt,
+		"prompt":    prompt,
 		"expiresAt": time.Now().Add(2 * time.Minute).UnixMilli(),
 	})
 	if err := os.WriteFile(markerPath, marker, 0600); err != nil {
@@ -977,10 +1085,6 @@ func main() {
 	client.AddEventHandler(b.handle)
 
 	if client.Store.ID == nil {
-		phone := os.Getenv("WA_PHONE")
-		if phone == "" {
-			log.Fatal("not linked yet: set WA_PHONE=<digits, country code first>")
-		}
 		qrChan, _ := client.GetQRChannel(ctx)
 		if err := client.Connect(); err != nil {
 			log.Fatalf("connect: %v", err)
@@ -990,11 +1094,7 @@ func main() {
 				// Draining the QR channel is required even when pairing by phone code.
 			}
 		}()
-		code, err := client.PairPhone(ctx, phone, true, whatsmeow.PairClientChrome, "Chrome (MacOS)")
-		if err != nil {
-			log.Fatalf("pair: %v", err)
-		}
-		log.Printf("\n\n  WhatsApp > Linked devices > Link with phone number\n  pairing code: %s\n\n", code)
+		log.Printf("not linked yet; open Agent Zero Settings > External > Meta AI WhatsApp Bridge to connect")
 	} else if err := client.Connect(); err != nil {
 		log.Fatalf("connect: %v", err)
 	}
@@ -1006,6 +1106,8 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{
 			map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "meta"}}})
 	})
+	http.HandleFunc("/v1/pair/status", b.servePairStatus)
+	http.HandleFunc("/v1/pair/start", b.servePairStart)
 
 	port := os.Getenv("WA_PORT")
 	if port == "" {

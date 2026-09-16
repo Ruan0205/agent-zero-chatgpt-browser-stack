@@ -18,6 +18,15 @@ MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "20"))
 READ_TIMEOUT = float(os.getenv("UPSTREAM_READ_TIMEOUT", "660"))
 RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524}
 TEMPORARY_MODEL_CODES = {"model_not_deployed", "model_pending_deploy"}
+TEMPORARY_STREAM_MESSAGES = (
+    "temporarily at capacity",
+    "temporarily unavailable",
+    "please try again shortly",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "overloaded",
+)
 SLOT = asyncio.Semaphore(1)
 ACTIVE = 0
 WAITING = 0
@@ -61,6 +70,19 @@ def temporary_model_error(payload: bytes) -> bool:
         return False
 
 
+def temporary_stream_error(payload: bytes) -> bool:
+    """Detect retryable provider errors delivered inside an HTTP-200 SSE body.
+
+    Featherless can accept a streaming request with status 200 and emit an
+    OpenAI error event before the first token.  Once response headers have been
+    forwarded, LiteLLM sees that as a MidStreamFallbackError and the proxy can
+    no longer retry.  Buffering the bounded SSE response lets us retry before
+    exposing any bytes to Agent Zero.
+    """
+    lowered = payload.decode("utf-8", errors="replace").lower()
+    return any(message in lowered for message in TEMPORARY_STREAM_MESSAGES)
+
+
 @app.get("/health")
 async def health() -> dict[str, object]:
     return {
@@ -90,6 +112,11 @@ async def proxy(path: str, request: Request):
     )
     try:
         body = await request.body()
+        try:
+            request_payload = json.loads(body) if body else {}
+        except Exception:
+            request_payload = {}
+        wants_stream = bool(request_payload.get("stream")) if isinstance(request_payload, dict) else False
         headers = {
             key: value
             for key, value in request.headers.items()
@@ -152,6 +179,35 @@ async def proxy(path: str, request: Request):
                     )
                     await asyncio.sleep(delay)
                     continue
+
+                # Do not forward streaming headers until the provider has
+                # completed successfully.  This is intentionally buffered:
+                # correctness and transparent retry are more important here
+                # than displaying partial tokens a few seconds earlier.
+                if response.status_code < 400 and wants_stream:
+                    payload = await response.aread()
+                    if temporary_stream_error(payload) and attempt + 1 < MAX_ATTEMPTS:
+                        last_message = payload.decode("utf-8", errors="replace")[-1000:]
+                        delay = retry_delay(attempt, response)
+                        await response.aclose()
+                        log.warning(
+                            "retryable error inside HTTP-200 stream; keeping partition slot and retrying %s/%s in %ss",
+                            attempt + 1,
+                            MAX_ATTEMPTS,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    await response.aclose()
+                    await client.aclose()
+                    ACTIVE = 0
+                    SLOT.release()
+                    handed_to_stream = True
+                    return Response(
+                        content=payload,
+                        status_code=response.status_code,
+                        headers=response_headers(response.headers),
+                    )
 
                 async def stream_body() -> AsyncIterator[bytes]:
                     global ACTIVE

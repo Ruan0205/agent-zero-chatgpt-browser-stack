@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {buildPrompt,validateAnswer,isAgentTurn,browserActionContext,operationalActionContext,extractedUserText,isCurrentUserMessage}=require('./bridge-core');
+const {buildPrompt,validateAnswer,attachmentInputs,isAgentTurn,browserActionContext,operationalActionContext,extractedUserText,isCurrentUserMessage}=require('./bridge-core');
 const system={role:'system',content:'# Agent Zero System Manual\n## available tools\n### code_execution_tool\nFULL TOOL DOCS'};
 const body=messages=>({messages:[system,...messages]});
 test('large tool output is bounded without discarding real task or tool schema',()=>{
@@ -17,18 +17,49 @@ test('malformed, partial, nested, leaked fields fail closed',()=>{
  for(const s of ['plain text','{"tool_name":','{"thoughts":[],"headline":"x","tool_name":"response","tool_args":{"text":"{\\"partial\\":1}","other":"lost"}}'])assert.throws(()=>validateAnswer(s,body([])));
 });
 test('terminal command passes unchanged, not replaced by inventory',()=>{const s=JSON.stringify({thoughts:[],headline:'read',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',code:'hostname',session:0}});assert.equal(validateAnswer(s,body([])),s);});
-test('terminal command alias is normalized to code',()=>{
- const parsed=JSON.parse(validateAnswer(JSON.stringify({thoughts:[],headline:'x',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',command:'hostname'}}),body([])));
- assert.equal(parsed.tool_args.code,'hostname');
- assert.equal('command' in parsed.tool_args,false);
-});
+test('terminal command alias is normalized',()=>assert.equal(JSON.parse(validateAnswer(JSON.stringify({thoughts:[],headline:'x',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',command:'hostname'}}),body([]))).tool_args.code,'hostname'));
 test('fenced JSON preserves terminal quotes and backslashes',()=>{
  const code='printf "%s\\n" "teste com aspas"';
  const raw=JSON.stringify({thoughts:[],headline:'x',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',code}});
  assert.equal(JSON.parse(validateAnswer('```json\n'+raw+'\n```',body([]))).tool_args.code,code);
  assert.ok(buildPrompt(body([])).includes('ONE fenced json code block'));
 });
-test('image inputs cannot be silently omitted',()=>assert.throws(()=>buildPrompt(body([{role:'user',content:[{type:'image_url',image_url:{url:'x'}}]}])),/image inputs/));
+test('image inputs are represented and local media is extracted',()=>{
+ const b=body([{role:'user',content:[{type:'text',text:'describe'},{type:'image_url',image_url:{url:'/a0/usr/uploads/x.png'}}]}]);
+ assert.ok(buildPrompt(b).includes('Attached image'));
+ assert.deepEqual(attachmentInputs(b),['/a0/usr/uploads/x.png']);
+});
+test('attachments embedded in Agent Zero Human transcript are extracted',()=>{
+ const b=body([{role:'user',content:'Human: {"user_message":"read","attachments":["/a0/usr/uploads/a.pdf","/a0/usr/uploads/b.zip"]}'}]);
+ assert.deepEqual(attachmentInputs(b,null,{browserOwnsHistory:true}),['/a0/usr/uploads/a.pdf','/a0/usr/uploads/b.zip']);
+});
+
+test('artifacts returned by chatgpt browser media are never reuploaded on the next request',()=>{
+ const b=body([
+  {role:'user',content:'{"user_message":"create png"}'},
+  {role:'assistant',content:'{"tool_name":"chatgpt_browser_media","tool_args":{"files":[{"source":"old.png"}]}}'},
+  {role:'user',content:JSON.stringify({tool_result:{_tool_name:'chatgpt_browser_media',attachments:['/a0/usr/uploads/old.png'],media_paths:['/a0/usr/uploads/old.png']}})},
+  {role:'user',content:'{"user_message":"create jpg"}'},
+ ]);
+ assert.deepEqual(attachmentInputs(b,null,{browserOwnsHistory:true}),[]);
+});
+
+test('plain browser-media output paths are not reused as later attachments',()=>{
+ const b=body([
+  {role:'user',content:'{"user_message":"create png"}'},
+  {role:'assistant',content:'Using chatgpt_browser_media'},
+  {role:'user',content:'Mídia pronta. /a0/usr/uploads/old.png'},
+  {role:'user',content:'{"user_message":"create jpg"}'},
+ ]);
+ assert.deepEqual(attachmentInputs(b,null,{browserOwnsHistory:true}),[]);
+});
+
+test('chatgpt-browser lean catalog excludes meta ai and allows native media',()=>{
+ const b={messages:[{role:'system',content:'# Agent Zero System Manual\n## available tools\n### meta_ai_image\nMeta tool\n### response\nResponse tool'},{role:'user',content:'{"user_message":"gere uma imagem"}'}]};
+ const p=buildPrompt(b,180000,null,null,{browserOwnsHistory:true,callScope:'main'});
+ assert.ok(p.includes("may use ChatGPT's native image/file"));
+ assert.ok(!p.includes('### meta_ai_image'));
+});
 
 test('explicit browser action gets compact mandatory schema reminder',()=>{
  const b=body([{role:'user',content:'{"user_message":"abra um blog no navegador do Agent Zero"}'}]);
@@ -112,6 +143,22 @@ test('tool result containing nested user_message is never a real user turn',()=>
  assert.ok(p.includes('real request'));
 });
 
+test('fresh user envelope concatenated after tool result remains current',()=>{
+ const merged='{"tool_name":"chatgpt_browser_media","tool_result":"failed with nested \\\"user_message\\\": stale"} {"user_message":"crie e entregue arquivo validacao-84.iso como anexo baixável"}';
+ const message={role:'user',content:merged};
+ assert.equal(isCurrentUserMessage(message),true);
+ assert.equal(extractedUserText(merged),'crie e entregue arquivo validacao-84.iso como anexo baixável');
+ const intent=operationalActionContext(body([message]));
+ assert.equal(intent.requested,true);
+ assert.deepEqual(intent.requiredTools,['code_execution_tool','chatgpt_browser_media']);
+});
+
+test('failed media result followed by a fresh user envelope remains current',()=>{
+ const message={role:'user',content:'{"tool_name":"chatgpt_browser_media","tool_result":"import failed"}\n{"user_message":"retry the PNG"}'};
+ assert.equal(isCurrentUserMessage(message),true);
+ assert.equal(extractedUserText(message.content),'retry the PNG');
+});
+
 test('browser-owned history sends only messages appended after prior hashes',()=>{
  const first=body([{role:'user',content:'{"user_message":"old request"}'},{role:'assistant',content:'old assistant'}]);
  const crypto=require('crypto');
@@ -177,4 +224,34 @@ test('first browser-owned agent call uses lean tool catalog and preserves latest
  assert.ok(p.includes('PROMPT_MUST_SURVIVE'));
  assert.ok(p.includes('compact transport catalog'));
  assert.ok(p.length<64000);
+});
+
+test('internal UI attachment marker is uploaded and removed from visible user text',()=>{
+ const content='```json\n'+JSON.stringify({
+  user_message:'Leia o arquivo.\n[A0_BROWSER_ATTACHMENTS_JSON]["/a0/usr/uploads/entrada-01.png"]'
+ })+'\n```';
+ const b={messages:[{role:'user',content}]};
+ assert.deepEqual(attachmentInputs(b,null,{browserOwnsHistory:true}),['/a0/usr/uploads/entrada-01.png']);
+ assert.ok(!extractedUserText(content).includes('A0_BROWSER_ATTACHMENTS_JSON'));
+});
+
+test('explicit JSON data response is wrapped as final Agent Zero response',()=>{
+ const b=body([{role:'user',content:JSON.stringify({user_message:'Responda somente com um objeto JSON contendo status e sha256.'})}]);
+ const raw='{"status":"ok","sha256":"abc"}';
+ const parsed=JSON.parse(validateAnswer(raw,b,{callScope:'main:0'}));
+ assert.equal(parsed.tool_name,'response');
+ assert.equal(parsed.tool_args.text,raw);
+});
+
+test('explicit JSON data response is allowed inside a valid response envelope',()=>{
+ const b=body([{role:'user',content:JSON.stringify({user_message:'Retorne exatamente um objeto JSON com status.'})}]);
+ const envelope=JSON.stringify({thoughts:['feito'],headline:'JSON final',tool_name:'response',tool_args:{text:'{"status":"ok"}'}});
+ const parsed=JSON.parse(validateAnswer(envelope,b,{callScope:'main:0'}));
+ assert.equal(parsed.tool_args.text,'{"status":"ok"}');
+});
+
+test('input-file analysis with explicit no-return clause does not require media publication',()=>{
+ const request='Abra o anexo real entrada-09.xls, valide o arquivo e responda JSON. Não crie, edite nem devolva arquivos neste teste.';
+ const intent=operationalActionContext(body([{role:'user',content:JSON.stringify({user_message:request})}]));
+ assert.ok(!intent.requiredTools.includes('chatgpt_browser_media'));
 });

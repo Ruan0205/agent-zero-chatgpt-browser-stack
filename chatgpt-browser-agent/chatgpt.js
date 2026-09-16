@@ -27,6 +27,7 @@ const path                = require('path');
 const os                  = require('os');
 const fs                  = require('fs');
 const http                = require('http');
+const crypto              = require('crypto');
 const readline            = require('readline');
 const { execSync, spawn } = require('child_process');
 
@@ -37,6 +38,10 @@ puppeteer.use(StealthPlugin());
 
 const CHROME_PATH      = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const STATE_DIR        = process.env.CHATGPT_BROWSER_STATE_DIR || os.homedir();
+// Browser profiles are isolated per pool slot, while Agent Zero consumes one
+// shared media outbox. Without this override an artifact is advertised from a
+// slot-private directory that the Agent Zero container cannot see.
+const OUTBOX_DIR       = process.env.CHATGPT_BROWSER_OUTBOX_DIR || path.join(STATE_DIR, 'outbox');
 const PROFILE_DIR      = path.join(STATE_DIR, '.chatgpt-poc-profile');
 const SESSION_FILE     = path.join(STATE_DIR, '.chatgpt-poc-session');
 const DAEMON_FILE      = path.join(STATE_DIR, '.chatgpt-poc-daemon.json');
@@ -47,7 +52,8 @@ const CHATGPT_URL      = 'https://chatgpt.com';
 // begin answering within 60 seconds; otherwise the daemon reloads once and
 // makes one final attempt inside the same overall budget.
 const REQUEST_TIMEOUT        = 130_000;
-const RESPONSE_START_TIMEOUT = 60_000;
+const MAX_REQUEST_TIMEOUT    = 360_000;
+const RESPONSE_START_TIMEOUT = 130_000;
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
@@ -124,10 +130,12 @@ function buildFullPrompt({ userPrompt, stdinData, fileData, gitData, contextData
  * After setting the files via CDP we fire a synthetic change event so React's
  * event system picks up the new FileList and registers the attachment.
  */
-async function uploadFileToChatGPT(page, uploadPath, log) {
-  const abs = path.resolve(uploadPath);
-  if (!fs.existsSync(abs)) throw new Error(`Upload file not found: ${abs}`);
-  log(`Uploading file: ${abs}`);
+async function uploadFilesToChatGPT(page, uploadPaths, log) {
+  const paths=[...new Set((uploadPaths||[]).filter(Boolean).map(p=>path.resolve(p)))];
+  if(!paths.length) return;
+  if(paths.length>20) throw new Error('At most 20 attachments may be uploaded in one request');
+  for(const abs of paths) if (!fs.existsSync(abs)) throw new Error(`Upload file not found: ${abs}`);
+  log(`Uploading ${paths.length} file(s): ${paths.map(p=>path.basename(p)).join(', ')}`);
 
   await page.bringToFront();
 
@@ -146,7 +154,7 @@ async function uploadFileToChatGPT(page, uploadPath, log) {
   const inputHandle = await page.waitForSelector('#upload-files', { timeout: 8_000 });
 
   // CDP-level file injection — no dialog needed
-  await inputHandle.uploadFile(abs);
+  await inputHandle.uploadFile(...paths);
 
   // uploadFile already dispatches input/change. A second change can clear it.
 
@@ -155,10 +163,460 @@ async function uploadFileToChatGPT(page, uploadPath, log) {
 
   // ChatGPT may show a "You've already uploaded this file" warning dialog when
   // the same file has been uploaded recently.  Dismiss it so the flow continues.
-  await page.waitForFunction(name => document.body.innerText.includes(name),
-    {timeout:60000}, path.basename(abs));
+  // ChatGPT no longer exposes every uploaded filename as page text (notably
+  // ZIP/PDF chips), so filename matching produces false 60s timeouts. The
+  // authoritative readiness check is the enabled send button after the prompt
+  // is inserted, performed below by the request flow.
+  log('Files injected; final upload readiness will be verified by the send control.');
+}
 
-  log('Upload complete.');
+async function collectAssistantArtifacts(page, log, responseTurnId=null) {
+  // Keep this list aligned with every artifact type the Agent Zero bridge is
+  // expected to return. ChatGPT often renders generated files as buttons
+  // whose only useful signal is the filename, rather than as normal links.
+  const downloadableExtensionPattern='\\.(?:png|jpe?g|webp|gif|pdf|docx?|xlsx?|xls|pptx?|csv|tsv|txt|md|json|xml|ya?ml|html?|svg|py|js|ts|jsx|tsx|java|c|cpp|h|hpp|cs|go|rs|php|rb|sh|ps1|bat|sql|css|toml|ini|cfg|conf|log|ipynb|zip|7z|rar|tar|tar\\.gz|tgz|gz|bz2|xz|sqlite|db|parquet|feather|npy|npz|h5|hdf5|mat|stl|obj|ply|gltf|glb|dae|dxf|wav|mp3|flac|ogg|opus|aac|mp4|mov|mkv|avi|webm|iso|bin|exe|dll|so|apk|jar)\\b';
+  const found=await page.evaluate(async (targetTurnId) => {
+    const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]'));
+    const assistant=[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
+    const root=(targetTurnId ? document.querySelector(`[data-testid="${CSS.escape(targetTurnId)}"]`) : null)
+      || (!targetTurnId ? turns.at(-1) : null)
+      || (!targetTurnId ? assistant?.closest('[data-testid^="conversation-turn-"]') : null)
+      || (!targetTurnId ? assistant : null);
+    if(!root) return [];
+    const candidates=[];
+    for(const a of root.querySelectorAll('a[href]')) {
+      const href=a.href;
+      const label=(a.getAttribute('download')||a.textContent||'').trim();
+      if(a.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(href)) candidates.push({url:href,name:label});
+    }
+    for(const img of root.querySelectorAll('img[src]')) {
+      const r=img.getBoundingClientRect();
+      if((img.naturalWidth||r.width)<128 || (img.naturalHeight||r.height)<128) continue;
+      if(/avatar|profile|emoji|icon/i.test(`${img.alt||''} ${img.className||''}`)) continue;
+      candidates.push({url:img.currentSrc||img.src,name:img.alt||''});
+    }
+    const out=[];
+    const seen=new Set();
+    for(const candidate of candidates) {
+      if(!candidate.url || seen.has(candidate.url)) continue;
+      seen.add(candidate.url);
+      try {
+        const response=await fetch(candidate.url,{credentials:'include'});
+        if(!response.ok) continue;
+        const buffer=await response.arrayBuffer();
+        if(!buffer.byteLength || buffer.byteLength>100*1024*1024) continue;
+        const bytes=new Uint8Array(buffer);
+        let binary='';
+        for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+        out.push({data:btoa(binary),mime:(response.headers.get('content-type')||'application/octet-stream').split(';')[0],name:candidate.name,url:candidate.url});
+      } catch {}
+    }
+    return out;
+  },responseTurnId);
+  const downloadDir=path.join(STATE_DIR,`downloads-${crypto.randomUUID()}`);
+  fs.mkdirSync(downloadDir,{recursive:true,mode:0o700});
+  let client=null;
+  try {
+    client=await page.target().createCDPSession();
+    await client.send('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDir,eventsEnabled:true});
+    await client.send('Network.enable').catch(()=>{});
+    const downloadEvents=[];
+    const networkEvents=[];
+    client.on('Browser.downloadWillBegin',event=>downloadEvents.push({type:'willBegin',guid:event.guid,url:event.url,suggestedFilename:event.suggestedFilename}));
+    client.on('Browser.downloadProgress',event=>{
+      if(event.state!=='inProgress') downloadEvents.push({type:'progress',guid:event.guid,state:event.state,receivedBytes:event.receivedBytes,totalBytes:event.totalBytes});
+    });
+    client.on('Network.requestWillBeSent',event=>{
+      const url=event.request?.url||'';
+      if(/sandbox:|\/mnt\/data|backend-api|estuary|download|files\//i.test(url))
+        networkEvents.push({requestId:event.requestId,url,method:event.request?.method||'',type:event.type||'',documentURL:event.documentURL||''});
+      if(networkEvents.length>50) networkEvents.shift();
+    });
+    client.on('Network.responseReceived',event=>{
+      const item=networkEvents.find(candidate=>candidate.requestId===event.requestId);
+      if(item) {
+        item.status=event.response?.status||0;
+        item.mimeType=event.response?.mimeType||'';
+      }
+    });
+    client.on('Network.loadingFinished',async event=>{
+      const item=networkEvents.find(candidate=>candidate.requestId===event.requestId);
+      if(!item||(!item.url.includes('/interpreter/download?')&&!item.url.includes('/simple?'))) return;
+      try {
+        const body=await client.send('Network.getResponseBody',{requestId:event.requestId});
+        item.responseBody=body.body;
+        item.responseBase64=Boolean(body.base64Encoded);
+        log(`Captured artifact metadata (${item.url.includes('/simple?')?'simple':'interpreter'}): ${String(body.body).slice(0,2000)}`);
+      } catch(error) { log(`Artifact metadata capture warning: ${error.message}`); }
+    });
+    const roots=responseTurnId
+      ? [await page.$(`[data-testid="${responseTurnId.replace(/[^A-Za-z0-9_-]/g,'')}"]`)].filter(Boolean)
+      : await page.$$('[data-testid^="conversation-turn-"]');
+    let responseRoot=null;
+    for(let i=roots.length-1;i>=0;i--) {
+      const isUser=await roots[i].$('[data-message-author-role="user"]');
+      if(isUser) continue;
+      // A base64 compatibility envelope is itself sufficient evidence that
+      // this assistant turn owns an artifact. ChatGPT may deliberately strip
+      // file:// links from rendered controls, leaving no button or anchor for
+      // the older control-only detector even though the exact bytes are in the
+      // response text.
+      const hasEnvelope=await roots[i].evaluate(el=>{
+        const text=el.innerText||el.textContent||'';
+        return text.includes('A0_ARTIFACT_BASE64_BEGIN')&&text.includes('A0_ARTIFACT_BASE64_END');
+      }).catch(()=>false);
+      if(hasEnvelope) { responseRoot=roots[i]; break; }
+      const elements=await roots[i].$$('button,a[href]');
+      let hasDownload=false;
+      for(const element of elements) {
+        hasDownload=await element.evaluate((el,pattern)=>{
+          const label=`${el.getAttribute('aria-label')||''} ${el.getAttribute('download')||''} ${el.innerText||el.textContent||''} ${el.getAttribute('href')||''}`;
+          const ext=new RegExp(pattern,'i');
+          return /download file|baixar|download|sandbox:\/|\/mnt\/data/i.test(label)||ext.test(label);
+        },downloadableExtensionPattern).catch(()=>false);
+        if(hasDownload) break;
+      }
+      if(hasDownload) { responseRoot=roots[i]; break; }
+    }
+    if(responseRoot) {
+      // ChatGPT's Estuary service can reject active text/code extensions
+      // (for example .js) with HTTP 415 even though the file was created.
+      // In that case the prompt asks for the exact bytes in a compact base64
+      // envelope. Materialize only that explicit, model-authored envelope.
+      const envelope=await responseRoot.evaluate(el=>{
+        const rendered=el.innerText||el.textContent||'';
+        const candidates=[];
+        // Agent responses are displayed as a JSON code block. In the DOM the
+        // newlines inside tool_args.text are escaped as literal "\\n", so
+        // parse the outer JSON before looking for the binary envelope.
+        try {
+          const start=rendered.indexOf('{'), end=rendered.lastIndexOf('}');
+          if(start>=0&&end>start) {
+            const parsed=JSON.parse(rendered.slice(start,end+1));
+            if(typeof parsed?.tool_args?.text==='string') candidates.push(parsed.tool_args.text);
+          }
+        } catch {}
+        candidates.push(rendered);
+        for(const text of candidates) {
+          const match=text.match(/A0_ARTIFACT_BASE64_BEGIN\s+([^\s]+)\s+([A-Za-z0-9+/=\r\n]+?)\s+A0_ARTIFACT_BASE64_END/i);
+          if(match) return {name:match[1],data:match[2].replace(/\s+/g,'')};
+        }
+        return null;
+      }).catch(()=>null);
+      if(envelope&&/^[A-Za-z0-9._-]+$/.test(envelope.name)) {
+        try {
+          const buffer=Buffer.from(envelope.data,'base64');
+          if(buffer.length&&buffer.length<=100*1024*1024) {
+            found.push({data:buffer.toString('base64'),mime:'application/octet-stream',name:envelope.name,url:'browser-text-envelope'});
+            log(`Collected model-authored artifact envelope: ${envelope.name} (${buffer.length} bytes)`);
+          }
+        } catch(error) { log(`Artifact envelope decode warning: ${error.message}`); }
+      }
+      const elements=found.length ? [] : await responseRoot.$$('button,a[href]');
+      const buttons=[];
+      for(const element of elements) {
+        const downloadLike=await element.evaluate((el,pattern)=>{
+          const label=`${el.getAttribute('aria-label')||''} ${el.getAttribute('download')||''} ${el.innerText||el.textContent||''} ${el.getAttribute('href')||''}`;
+          const ext=new RegExp(pattern,'i');
+          return /download file|baixar|download/i.test(label)||ext.test(label);
+        },downloadableExtensionPattern).catch(()=>false);
+        if(downloadLike) {
+          const priority=await element.evaluate(el=>/download file|baixar|download/i.test(`${el.getAttribute('aria-label')||''} ${el.innerText||el.textContent||''}`)?0:1).catch(()=>1);
+          buttons.push({element,priority});
+        }
+      }
+      buttons.sort((a,b)=>a.priority-b.priority);
+      for(const entry of buttons.slice(0,20)) {
+        const button=entry.element;
+        const buttonLabel=await button.evaluate(el=>`${el.getAttribute('aria-label')||''} ${el.getAttribute('download')||''} ${el.innerText||el.textContent||''} ${el.getAttribute('href')||''}`.trim().slice(0,500)).catch(()=>'<unreadable>');
+        const buttonDetails=await button.evaluate(el=>({
+          outerHTML:el.outerHTML.slice(0,2000),disabled:Boolean(el.disabled),
+          rect:(()=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};})(),
+          visible:Boolean(el.offsetWidth||el.offsetHeight||el.getClientRects().length),
+        })).catch(error=>({error:error.message}));
+        log(`Trying artifact control: ${buttonLabel}; details=${JSON.stringify(buttonDetails)}`);
+        const sourceToken=crypto.randomUUID();
+        await button.evaluate((el,token)=>el.setAttribute('data-a0-download-source',token),sourceToken).catch(()=>{});
+        const before=new Set(fs.readdirSync(downloadDir));
+        const networkBefore=networkEvents.length;
+        await button.click().catch(()=>{});
+        let saved=''; let previousSize=-1;
+        for(let i=0;i<12;i++) {
+          await new Promise(r=>setTimeout(r,500));
+          const candidates=fs.readdirSync(downloadDir).filter(n=>!before.has(n)&&!n.endsWith('.crdownload'));
+          if(candidates.length) {
+            const candidate=candidates[0], size=fs.statSync(path.join(downloadDir,candidate)).size;
+            if(size>0 && size===previousSize) { saved=candidate; break; }
+            previousSize=size;
+          }
+        }
+        if(!saved) {
+          const postClick=await page.evaluate(()=>({
+            url:location.href,
+            dialogs:[...document.querySelectorAll('[role="dialog"],dialog')].map(el=>(el.innerText||el.textContent||'').trim().slice(0,800)),
+            downloads:[...document.querySelectorAll('button,a[href],[role="button"]')].filter(el=>/download file|baixar arquivo|download/i.test(`${el.getAttribute('aria-label')||''} ${el.innerText||el.textContent||''}`)).slice(-20).map(el=>({tag:el.tagName,text:(el.innerText||el.textContent||'').trim().slice(0,200),aria:el.getAttribute('aria-label'),href:el.getAttribute('href'),visible:Boolean(el.offsetWidth||el.offsetHeight||el.getClientRects().length)})),
+          })).catch(error=>({error:error.message}));
+          log(`Artifact click produced no file after 6s; events=${JSON.stringify(downloadEvents)}; state=${JSON.stringify(postClick)}`);
+
+          // Some generated code/document downloads are issued as a signed
+          // Estuary fetch and then incorrectly navigated by Chrome as a
+          // document, producing chrome-error://chromewebdata instead of a
+          // Browser.download event. Recover only the URL triggered by this
+          // exact click and fetch its original bytes with the logged-in cookie.
+          // The ChatGPT UI no longer adds `cd=attachment` (or even `fn=`) to
+          // every generated-file response.  The response is still safe to
+          // associate here because it must have been emitted *after* the exact
+          // control from this assistant turn was activated.  Requiring the
+          // optional query parameter made valid image/file responses visible
+          // in the browser but impossible to return to Agent Zero.
+          const triggeredEstuary=networkEvents.slice(networkBefore).reverse()
+            .find(event=>/\/backend-api\/estuary\/content\?/i.test(event.url));
+          if(triggeredEstuary) {
+            try {
+              const responseBody=await client.send('Network.getResponseBody',{requestId:triggeredEstuary.requestId});
+              const buffer=responseBody.base64Encoded ? Buffer.from(responseBody.body,'base64') : Buffer.from(responseBody.body);
+              if((!triggeredEstuary.status||triggeredEstuary.status<400)&&buffer.length) {
+                const parsed=new URL(triggeredEstuary.url);
+                const recoveredName=parsed.searchParams.get('fn')||buttonLabel.replace(/^.*?Download\s+/i,'').trim();
+                const mime=triggeredEstuary.mimeType||'application/octet-stream';
+                found.push({data:buffer.toString('base64'),mime,name:recoveredName,url:triggeredEstuary.url});
+                log(`Collected Chromium Estuary response: ${recoveredName} (${buffer.length} bytes; HTTP ${triggeredEstuary.status||'unknown'}; ${mime})`);
+                if(page.url().startsWith('chrome-error://')&&fs.existsSync(SESSION_FILE)) {
+                  const restore=fs.readFileSync(SESSION_FILE,'utf8').trim();
+                  await page.goto(restore,{waitUntil:'domcontentloaded',timeout:60_000}).catch(()=>{});
+                  log(`Restored mapped chat after intercepted download navigation: ${restore}`);
+                }
+                break;
+              }
+              log(`Chromium Estuary response was empty or failed: HTTP ${triggeredEstuary.status||'unknown'}`);
+            } catch(error) { log(`Chromium Estuary response recovery warning: ${error.message}`); }
+          }
+
+          // Image artifacts are rendered by the current ChatGPT lightbox from
+          // an authenticated Estuary URL and intentionally expose no download
+          // button. Copy the exact bytes shown in that active preview using the
+          // browser session's credentials. This preserves the provider output
+          // byte-for-byte instead of taking a screenshot or re-encoding it.
+          const previewImage=await page.evaluate(async exactName=>{
+            const dialogs=[...document.querySelectorAll('[role="dialog"],dialog,[aria-modal="true"]')]
+              .filter(el=>Boolean(el.offsetWidth||el.offsetHeight||el.getClientRects().length)).reverse();
+            for(const dialog of dialogs) {
+              const images=[...dialog.querySelectorAll('img[src]')];
+              const image=images.find(img=>(img.alt||'').trim()===exactName)||images.at(-1);
+              if(!image?.src) continue;
+              try {
+                const response=await fetch(image.currentSrc||image.src,{credentials:'include'});
+                if(!response.ok) continue;
+                const buffer=await response.arrayBuffer();
+                if(!buffer.byteLength||buffer.byteLength>100*1024*1024) continue;
+                const bytes=new Uint8Array(buffer); let binary='';
+                for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+                return {data:btoa(binary),mime:(response.headers.get('content-type')||'application/octet-stream').split(';')[0],
+                  name:exactName.replace(/^Download\s+/i,''),url:image.currentSrc||image.src,size:buffer.byteLength};
+              } catch {}
+            }
+            return null;
+          },buttonLabel.trim()).catch(()=>null);
+          if(previewImage) {
+            found.push(previewImage);
+            log(`Collected authenticated preview image: ${previewImage.name} (${previewImage.size} bytes; ${previewImage.mime})`);
+            await page.keyboard.press('Escape').catch(()=>{});
+            await page.evaluate(token=>document.querySelector(`[data-a0-download-source="${CSS.escape(token)}"]`)?.removeAttribute('data-a0-download-source'),sourceToken).catch(()=>{});
+            break;
+          }
+
+          // Generated-file pills can open a preview dialog instead of directly
+          // downloading. Activate the dialog's own download control, scoped to
+          // the newest visible dialog so an older file cannot be selected.
+          let activatedSecondary=false;
+          // The current ChatGPT file preview renders two controls with the
+          // exact filename inside its modal: the first is the preview title and
+          // the last is the actual download action.  Resolve and activate that
+          // last duplicate in one DOM evaluation so detached ElementHandles or
+          // unrelated global controls (for example "Download apps") can never
+          // be selected.
+          const dialogActivation=await page.evaluate(({exactName,sourceToken})=>{
+            const visible=el=>Boolean(el.offsetWidth||el.offsetHeight||el.getClientRects().length);
+            const dialogs=[...document.querySelectorAll('[role="dialog"],dialog,[aria-modal="true"]')]
+              .filter(visible).reverse();
+            for(const dialog of dialogs) {
+              const controls=[...dialog.querySelectorAll('button,a[href],[role="button"]')]
+                .filter(el=>visible(el)&&!el.disabled&&el.getAttribute('data-a0-download-source')!==sourceToken)
+                .filter(el=>(el.innerText||el.textContent||'').trim()===exactName);
+              if(!controls.length) continue;
+              const target=controls.at(-1);
+              const detail={count:controls.length,text:(target.innerText||target.textContent||'').trim(),
+                aria:target.getAttribute('aria-label'),href:target.getAttribute('href'),
+                outerHTML:target.outerHTML.slice(0,1200)};
+              target.click();
+              return {activated:true,detail};
+            }
+            return {activated:false,dialogs:dialogs.map(dialog=>({
+              text:(dialog.innerText||dialog.textContent||'').trim().slice(0,500),
+              outerHTML:dialog.outerHTML.slice(0,8000),
+              controls:[...dialog.querySelectorAll('button,a[href],[role="button"]')].map(el=>({
+                text:(el.innerText||el.textContent||'').trim().slice(0,200),aria:el.getAttribute('aria-label'),
+                visible:visible(el),disabled:Boolean(el.disabled)
+              })).slice(0,30)
+            }))};
+          },{exactName:buttonLabel.trim(),sourceToken}).catch(error=>({activated:false,error:error.message}));
+          if(dialogActivation.activated) {
+            log(`Activating preview-dialog download: ${JSON.stringify(dialogActivation.detail)}`);
+            activatedSecondary=true;
+          } else {
+            log(`No exact preview-dialog download control: ${JSON.stringify(dialogActivation)}`);
+          }
+          if(!activatedSecondary) {
+            // Some ChatGPT builds render the file preview in a portal without
+            // dialog semantics. Select the newly exposed, on-screen duplicate
+            // of the exact filename, never an older off-screen conversation
+            // pill and never the original control itself.
+            const globalControls=await page.$$('button,a[href],[role="button"]');
+            const portalCandidates=[];
+            const exactName=buttonLabel.replace(/^\s+|\s+$/g,'');
+            for(let index=0;index<globalControls.length;index++) {
+              const control=globalControls[index];
+              const detail=await control.evaluate((el,token)=>{
+                 const r=el.getBoundingClientRect();
+                 const text=(el.innerText||el.textContent||'').trim();
+                 const aria=(el.getAttribute('aria-label')||'').trim();
+                 const label=(text||aria).trim();
+                 const cx=Math.max(0,Math.min(innerWidth-1,r.left+r.width/2));
+                 const cy=Math.max(0,Math.min(innerHeight-1,r.top+r.height/2));
+                 const hit=document.elementFromPoint(cx,cy);
+                 return {same:el.getAttribute('data-a0-download-source')===token,label,disabled:Boolean(el.disabled),
+                   onScreen:r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth,
+                   topmost:Boolean(hit&&(hit===el||el.contains(hit))),
+                   modal:Boolean(el.closest('[role="dialog"],dialog,[aria-modal="true"],[data-state="open"]')),
+                   rect:{x:r.x,y:r.y,width:r.width,height:r.height},outerHTML:el.outerHTML.slice(0,1200)};
+               },sourceToken).catch(()=>null);
+               if(detail && !detail.same && !detail.disabled && detail.onScreen && detail.topmost
+                 && detail.label===exactName) {
+                 portalCandidates.push({control,detail,index});
+               }
+            }
+            portalCandidates.sort((a,b)=>Number(a.detail.modal)-Number(b.detail.modal)||a.index-b.index);
+             if(portalCandidates.length) {
+               const secondary=portalCandidates.at(-1);
+               log(`Activating portal download: ${JSON.stringify(secondary.detail)}`);
+               await secondary.control.click().catch(()=>{});
+               activatedSecondary=true;
+             } else {
+               const exactDiagnostics=[];
+               for(let index=0;index<globalControls.length;index++) {
+                 const detail=await globalControls[index].evaluate((el,name,token)=>{
+                   const text=(el.innerText||el.textContent||'').trim();
+                   const aria=(el.getAttribute('aria-label')||'').trim();
+                   if((text||aria).trim()!==name) return null;
+                   const r=el.getBoundingClientRect();
+                   const cx=Math.max(0,Math.min(innerWidth-1,r.left+r.width/2));
+                   const cy=Math.max(0,Math.min(innerHeight-1,r.top+r.height/2));
+                   const hit=document.elementFromPoint(cx,cy);
+                   return {same:el.getAttribute('data-a0-download-source')===token,
+                     visible:Boolean(el.offsetWidth||el.offsetHeight||el.getClientRects().length),
+                     onScreen:r.width>0&&r.height>0&&r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth,
+                     topmost:Boolean(hit&&(hit===el||el.contains(hit))),hit:hit?.outerHTML?.slice(0,300)||null,
+                     rect:{x:r.x,y:r.y,width:r.width,height:r.height},outerHTML:el.outerHTML.slice(0,500)};
+                 },exactName,sourceToken).catch(()=>null);
+                 if(detail) exactDiagnostics.push(detail);
+               }
+               log(`No topmost portal download control: ${JSON.stringify(exactDiagnostics)}`);
+             }
+          }
+          if(!activatedSecondary) {
+            // React occasionally ignores a pointer activation even though the
+            // pill is visible. One keyboard activation is a trusted fallback.
+            await button.focus().catch(()=>{});
+            await page.keyboard.press('Enter').catch(()=>{});
+          }
+          await page.evaluate(token=>document.querySelector(`[data-a0-download-source="${CSS.escape(token)}"]`)?.removeAttribute('data-a0-download-source'),sourceToken).catch(()=>{});
+          for(let i=0;i<48;i++) {
+            await new Promise(r=>setTimeout(r,500));
+            const candidates=fs.readdirSync(downloadDir).filter(n=>!before.has(n)&&!n.endsWith('.crdownload'));
+            if(candidates.length) {
+              const candidate=candidates[0], size=fs.statSync(path.join(downloadDir,candidate)).size;
+              if(size>0 && size===previousSize) { saved=candidate; break; }
+              previousSize=size;
+            }
+          }
+        }
+        if(saved) {
+          const buffer=fs.readFileSync(path.join(downloadDir,saved));
+          const ext=path.extname(saved).toLowerCase();
+          const mime={'.pdf':'application/pdf','.zip':'application/zip','.txt':'text/plain','.json':'application/json','.csv':'text/csv'}[ext]||'application/octet-stream';
+          found.push({data:buffer.toString('base64'),mime,name:saved,url:'browser-download'});
+          log(`Artifact control downloaded: ${saved} (${buffer.length} bytes)`);
+          break;
+        }
+        log(`Artifact control exhausted without a file; events=${JSON.stringify(downloadEvents)}; network=${JSON.stringify(networkEvents.slice(-12))}`);
+      }
+    }
+  } catch(error) { log(`Download-button collection warning: ${error.message}`); }
+  finally {
+    if(client) await client.detach().catch(()=>{});
+    fs.rmSync(downloadDir,{recursive:true,force:true});
+  }
+  const outDir=OUTBOX_DIR;
+  fs.mkdirSync(outDir,{recursive:true,mode:0o755});
+  const artifacts=[];
+  const seenHashes=new Set();
+  const extFor=mime=>({
+    'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','image/gif':'.gif',
+    'application/pdf':'.pdf','application/zip':'.zip','text/plain':'.txt',
+  }[mime]||'');
+  const mimeForName=name=>({
+    '.txt':'text/plain','.md':'text/markdown','.json':'application/json','.xml':'application/xml',
+    '.yaml':'application/yaml','.yml':'application/yaml','.html':'text/html','.htm':'text/html',
+    '.svg':'image/svg+xml','.py':'text/x-python','.js':'text/javascript','.ts':'text/typescript',
+    '.jsx':'text/jsx','.tsx':'text/tsx','.java':'text/x-java-source','.c':'text/x-c',
+    '.cpp':'text/x-c++src','.h':'text/x-c','.hpp':'text/x-c++hdr','.cs':'text/x-csharp',
+    '.go':'text/x-go','.rs':'text/x-rust','.php':'application/x-httpd-php','.rb':'text/x-ruby',
+    '.sh':'application/x-sh','.ps1':'text/plain','.bat':'text/plain','.sql':'application/sql',
+    '.css':'text/css','.toml':'application/toml','.ini':'text/plain','.cfg':'text/plain',
+    '.conf':'text/plain','.log':'text/plain','.gltf':'model/gltf+json','.obj':'model/obj',
+    '.ply':'model/ply','.stl':'model/stl','.dae':'model/vnd.collada+xml','.dxf':'image/vnd.dxf',
+  }[path.extname(String(name||'')).toLowerCase()]||'');
+  for(const item of found) {
+    const buffer=Buffer.from(item.data,'base64');
+    const hash=crypto.createHash('sha256').update(buffer).digest('hex');
+    if(seenHashes.has(hash)) continue;
+    seenHashes.add(hash);
+    let original=String(item.name||'').replace(/[\\/:*?"<>|\r\n]/g,' ').trim();
+    if(!original || original.length>120) original=`chatgpt-file${extFor(item.mime)}`;
+    let ext=path.extname(original).slice(0,12);
+    if(!ext) ext=extFor(item.mime);
+    const filename=`chatgpt-${crypto.randomUUID()}${ext}`;
+    fs.writeFileSync(path.join(outDir,filename),buffer,{mode:0o644});
+    const mime=(item.mime&&item.mime!=='application/octet-stream') ? item.mime : (mimeForName(original)||item.mime||'application/octet-stream');
+    artifacts.push({filename,originalName:original,mime,size:buffer.length,sha256:hash});
+  }
+  if(artifacts.length) log(`Collected ${artifacts.length} assistant artifact(s): ${artifacts.map(a=>a.originalName).join(', ')}`);
+  else {
+    const diagnostics=await page.evaluate((targetTurnId)=>{
+      const root=(targetTurnId ? document.querySelector(`[data-testid="${CSS.escape(targetTurnId)}"]`) : null)
+        || [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]')).at(-1);
+      const summarize=el=>({
+        tag:el.tagName,
+        text:String(el.innerText||el.textContent||'').trim().slice(0,240),
+        aria:el.getAttribute('aria-label'),
+        href:el.getAttribute('href'),
+        download:el.getAttribute('download'),
+        testid:el.getAttribute('data-testid'),
+        role:el.getAttribute('role'),
+      });
+      return {
+        targetTurnId,
+        rootFound:Boolean(root),
+        rootText:String(root?.innerText||root?.textContent||'').trim().slice(0,1200),
+        controls:root?[...root.querySelectorAll('a[href],button,[role="button"]')].slice(0,80).map(summarize):[],
+        pageFilenameMatches:[...document.querySelectorAll('a[href],button,[role="button"]')]
+          .filter(el=>/\.[a-z0-9.]{1,10}\b/i.test(`${el.innerText||el.textContent||''} ${el.getAttribute('aria-label')||''}`))
+          .slice(-40).map(summarize),
+      };
+    },responseTurnId).catch(error=>({diagnosticError:error.message}));
+    log(`No artifact collected; DOM summary=${JSON.stringify(diagnostics)}`);
+  }
+  return artifacts;
 }
 
 function launchBrowser() {
@@ -204,6 +662,7 @@ async function dismissBlockingOverlays(page, log) {
         const button=[...modal.querySelectorAll('button')].find(b=>visible(b) && labels.test((b.getAttribute('aria-label')||b.innerText||b.title||'').trim()));
         if(button) { button.click(); return {kind:'button',label:(button.getAttribute('aria-label')||button.innerText||button.title||'').trim()}; }
       }
+      if(candidates.length) return {kind:'blocked',tag:'MODAL',text:'visible dialog without a labelled close control'};
       if(send && visible(send)) {
         const r=send.getBoundingClientRect();
         const top=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
@@ -240,13 +699,40 @@ async function fillTextarea(page, text) {
   },{timeout:60000});
   const normalized=s=>s.replace(/\r/g,'').replace(/\n+/g,'\n').trim();
   for(let attempt=0;attempt<3;attempt++) {
+    // The composer can be replaced once or twice while a newly opened ChatGPT
+    // page finishes hydrating.  Inserting immediately into the old node looks
+    // successful to CDP but React then discards the whole draft.  Require the
+    // exact element to remain mounted for a short stability window first.
+    await page.waitForFunction(async()=>{
+      const first=document.querySelector('#prompt-textarea');
+      if(!first || first.getBoundingClientRect().height<=0) return false;
+      await new Promise(resolve=>setTimeout(resolve,600));
+      return document.querySelector('#prompt-textarea')===first && first.isConnected;
+    },{timeout:15_000,polling:250});
+
     await page.focus('#prompt-textarea');
     await page.keyboard.down('Control');
     await page.keyboard.press('a');
     await page.keyboard.up('Control');
-    await page.keyboard.sendCharacter(text);
-    await new Promise(r=>setTimeout(r,400));
-    const actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText);
+    await page.keyboard.press('Backspace');
+
+    // execCommand keeps ProseMirror/React's normal beforeinput/input pathway
+    // while performing one atomic insertion.  sendCharacter() can lose large
+    // prompts when four browser instances hydrate concurrently.
+    const inserted=await page.$eval('#prompt-textarea',(el,value)=>{
+      el.focus();
+      if(el.tagName==='TEXTAREA') {
+        const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
+        setter?.call(el,value);
+        el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));
+        return true;
+      }
+      document.execCommand('selectAll',false,null);
+      return document.execCommand('insertText',false,value);
+    },text);
+    if(!inserted) await page.keyboard.sendCharacter(text);
+    await new Promise(r=>setTimeout(r,500+attempt*500));
+    const actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>"");
     if(normalized(actual)===normalized(text)) return;
   }
   throw new Error('Composer failed verified insertion after 3 attempts; nothing submitted');
@@ -271,6 +757,40 @@ async function resetNewChatComposer(page, log) {
   log('New-chat composer reset and verified ready.');
 }
 
+async function enableTemporaryChat(page, log) {
+  const readControl=()=>page.waitForFunction(()=>{
+    const nodes=[...document.querySelectorAll('button,[role="button"]')];
+    const button=nodes.find(el=>/temporary chat|chat tempor[aá]rio/i.test(
+      `${el.getAttribute('aria-label')||''} ${el.innerText||''} ${el.title||''}`
+    ));
+    if(!button) return null;
+    return {label:(button.getAttribute('aria-label')||button.innerText||button.title||'').trim()};
+  },{timeout:30_000,polling:250}).then(handle=>handle.jsonValue());
+  let control=await readControl();
+  for(let attempt=0;attempt<3 && !/^turn off temporary chat$|^desativar (?:o )?chat tempor[aá]rio$/i.test(control.label);attempt++) {
+    await page.evaluate(()=>{
+      const nodes=[...document.querySelectorAll('button,[role="button"]')];
+      const button=nodes.find(el=>/temporary chat|chat tempor[aá]rio/i.test(
+        `${el.getAttribute('aria-label')||''} ${el.innerText||''} ${el.title||''}`
+      ));
+      if(!button) throw new Error('Temporary chat control disappeared');
+      button.click();
+    });
+    const active=await page.waitForFunction(()=>{
+      const nodes=[...document.querySelectorAll('button,[role="button"]')];
+      return nodes.some(el=>/^turn off temporary chat$|^desativar (?:o )?chat tempor[aá]rio$/i.test(
+        (el.getAttribute('aria-label')||el.innerText||el.title||'').trim()
+      ));
+    },{timeout:4_000,polling:250}).then(()=>true).catch(()=>false);
+    if(active) break;
+    control=await readControl();
+  }
+  control=await readControl();
+  if(!/^turn off temporary chat$|^desativar (?:o )?chat tempor[aá]rio$/i.test(control.label))
+    throw new Error(`Temporary chat mode did not activate; current control label: ${control.label||'unknown'}`);
+  log('Temporary ChatGPT mode verified active.');
+}
+
 async function readProviderRejection(page) {
   return page.evaluate(() => {
     const selectors='[role="alert"], [aria-live="assertive"], [data-testid*="toast"], [class*="toast"]';
@@ -287,7 +807,7 @@ async function readProviderRejection(page) {
     const nearby=(composerRegion?.innerText||'').trim();
     // Exact quota wording is safe to read globally: unlike generic request
     // errors it cannot be confused with normal historic assistant prose.
-    const pageCapacity=(document.body?.innerText||'').match(/(?:Messages limit reached|You(?:'|’)ve reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado))[^\n]*/i)?.[0]||'';
+    const pageCapacity=(document.body?.innerText||'').match(/(?:Messages limit reached|You(?:'|’)ve reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations)[^\n]*/i)?.[0]||'';
     const text=[visible,nearby,pageCapacity].filter(Boolean).join('\n');
     const patterns=[
       /The message you submitted was too long[^\n]*/i,
@@ -297,6 +817,8 @@ async function readProviderRejection(page) {
       /Messages limit reached[^\n]*/i,
       /You(?:'|’)ve reached your (?:message|usage) limit[^\n]*/i,
       /Limite de mensagens (?:atingido|alcançado)[^\n]*/i,
+      /Too many requests[^\n]*/i,
+      /temporarily limited access to your conversations[^\n]*/i,
     ];
     for(const pattern of patterns) {
       const match=text.match(pattern);
@@ -306,44 +828,65 @@ async function readProviderRejection(page) {
   }).catch(()=> '');
 }
 
-async function waitForStreamingDone(page, log, beforeCount, requestDeadline) {
-  // beforeCount must be measured BEFORE the message is sent so we don't
-  // accidentally measure it after ChatGPT has already started responding.
-  // The caller passes it in; fall back to measuring now only for text-only paths.
-  if (beforeCount === undefined) {
-    beforeCount = await page.evaluate(
-      () => document.querySelectorAll('[data-message-author-role="assistant"]').length
+async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, submittedUserTurnId=null) {
+  // The previous assistant turn identity must be measured BEFORE submission.
+  // A count is unsafe because ChatGPT virtualizes old turns and can keep the
+  // count unchanged while replacing the visible DOM nodes.
+  if (beforeTurnId === undefined) {
+    beforeTurnId = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)
+        ?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null
     );
   }
-  log(`waitForStreamingDone: beforeCount=${beforeCount}`);
+  log(`waitForStreamingDone: beforeTurnId=${beforeTurnId || '<none>'} submittedUserTurnId=${submittedUserTurnId || '<none>'}`);
 
   // Phase 1 — wait for a new assistant turn, while recognizing provider-side
   // rejection banners immediately instead of converting them into a 5-minute
   // timeout.
+  let responseTurnId = null;
   try {
-    const startDeadline=Math.min(
+    const initialStartDeadline=Math.min(
       requestDeadline,
       Date.now()+RESPONSE_START_TIMEOUT
     );
-    while(Date.now()<startDeadline) {
+    let activityObserved=false;
+    while(Date.now()<(activityObserved?requestDeadline:initialStartDeadline)) {
       const rejection=await readProviderRejection(page);
       if(rejection) throw new Error(`ChatGPT rejected the request: ${rejection}`);
-      const started=await page.evaluate(before => {
-        const msgs=document.querySelectorAll('[data-message-author-role="assistant"]');
-        const last=msgs[msgs.length-1];
-        const turn=last?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid');
-        const text=(last?.innerText||'').trim();
-        return !!turn && turn!==before && text ? text : '';
-      },beforeCount).catch(()=>'');
+      const phase=await page.evaluate(({before,submittedUser}) => {
+        const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')];
+        const userIndex=submittedUser ? turns.findIndex(turn=>turn.getAttribute('data-testid')===submittedUser) : -1;
+        const eligible=userIndex>=0 ? turns.slice(userIndex+1) : turns;
+        const latestTurn=eligible.filter(turn=>!turn.querySelector('[data-message-author-role="user"]')&&turn.querySelector('[data-message-author-role="assistant"]')).at(-1);
+        const currentAssistant=latestTurn?.querySelector('[data-message-author-role="assistant"]');
+        const turn=latestTurn?.getAttribute('data-testid');
+        const text=(currentAssistant?.innerText||'').trim();
+        const progressOnly=/^(?:analyzing|thinking|working|generating|processing|stopping thinking)(?:\.{0,3}|\s+\d+%)?$/i.test(text);
+        const media=[...(latestTurn?.querySelectorAll('img[src],a[href]')||[])].some(el=>{
+          if(el.tagName==='IMG') return (el.naturalWidth||0)>=128 && (el.naturalHeight||0)>=128;
+          return el.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(el.href||'');
+        });
+        const started=!!turn && turn!==before && ((!progressOnly&&text)||media) ? {turn,text:(!progressOnly&&text)||'[media started]'} : null;
+        const busy=!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]');
+        return {started,busy};
+      },{before:beforeTurnId,submittedUser:submittedUserTurnId}).catch(()=>null);
+      if(phase?.busy&&!activityObserved) {
+        activityObserved=true;
+        log('Visible ChatGPT processing detected before assistant turn; preserving the active generation until the request deadline');
+      }
+      const started=phase?.started;
       if(started) {
-        if(/message you submitted was too long|please edit it and resubmit|request is too large/i.test(started))
-          throw new Error(`ChatGPT rejected the request: ${started.slice(0,500)}`);
+        responseTurnId=started.turn;
+        if(/message you submitted was too long|please edit it and resubmit|request is too large/i.test(started.text))
+          throw new Error(`ChatGPT rejected the request: ${started.text.slice(0,500)}`);
         break;
       }
       await new Promise(r=>setTimeout(r,1000));
     }
-    if(Date.now()>=startDeadline) {
-      const error=new Error('Timed out waiting for ChatGPT to start responding');
+    if(Date.now()>=(activityObserved?requestDeadline:initialStartDeadline)) {
+      const error=new Error(activityObserved
+        ? 'Timed out waiting for ChatGPT to publish its assistant turn after visible processing'
+        : 'Timed out waiting for ChatGPT to start responding');
       error.code='CHATGPT_RESPONSE_START_TIMEOUT';
       throw error;
     }
@@ -368,14 +911,18 @@ async function waitForStreamingDone(page, log, beforeCount, requestDeadline) {
   let stableCount = 0;
   let stableEnvelope = '';
   let envelopeSince = 0;
+  let stableMedia = '';
+  let mediaSince = 0;
+  let stableDownloadText = '';
+  let downloadTextSince = 0;
   const deadline = requestDeadline;
   while (stableCount < 3) {
     if (Date.now() > deadline) throw new Error('Timed out waiting for final response; partial text not returned');
     await new Promise(r => setTimeout(r, 1000));
-    const state = await page.evaluate(() => {
-      const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
-      const last = msgs[msgs.length - 1];
-      const turn = last?.closest('[data-testid^="conversation-turn-"], article');
+    const state = await page.evaluate(expectedTurnId => {
+      const turn = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]')).at(-1);
+      const turnId=turn?.getAttribute('data-testid') || null;
+      const last = turn?.querySelector('[data-message-author-role="assistant"]');
       const codes=last?.querySelectorAll('pre code');
       let envelope='';
       if(codes?.length===1) {
@@ -388,20 +935,47 @@ async function waitForStreamingDone(page, log, beforeCount, requestDeadline) {
           if(obj && Object.keys(obj).length===1 && typeof obj.browser_utility_text==='string') envelope=raw;
         } catch {}
       }
-      return {text:last?.innerText || '',envelope,
+      const media=[...(turn?.querySelectorAll('img[src],a[href]')||[])].flatMap(el=>{
+        if(el.tagName==='IMG') return (el.naturalWidth||0)>=128 && (el.naturalHeight||0)>=128 ? [`img:${el.currentSrc||el.src}:${el.naturalWidth}x${el.naturalHeight}`] : [];
+        return el.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(el.href||'') ? [`file:${el.href}`] : [];
+      }).sort().join('|');
+      return {turnId,expectedTurnId,isExpected:turnId===expectedTurnId,text:last?.innerText || '',envelope,media,
         failed:!!turn?.querySelector('button[data-testid="regenerate-thread-error-button"]'),
-        busy:!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],[data-is-streaming="true"]'),
+        busy:!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]'),
         final:!!turn?.querySelector('button[data-testid="copy-turn-action-button"],button[data-testid="good-response-turn-action-button"],button[data-testid="bad-response-turn-action-button"]')};
-    });
+    },responseTurnId);
+    if(!state.isExpected) continue;
     if(state.failed) throw new Error('ChatGPT rejected the request: '+state.text.slice(0,180));
     if (!state.busy && state.final && state.text && state.text === lastText) stableCount++;
     else stableCount = 0;
+    if(Date.now()>deadline-1500) log(`final timeout state: ${JSON.stringify(state).slice(0,4000)}`);
     lastText = state.text;
+    const downloadText=/\bDownload\s+[^\n]+\.[a-z0-9.]{1,12}\b/i.test(state.text||'') ? state.text : '';
+    if(downloadText && downloadText===stableDownloadText) {
+      if(!downloadTextSince) downloadTextSince=Date.now();
+      if(Date.now()-downloadTextSince>=15000) {
+        const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
+        if(stop) await stop.click();
+        if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(page.url()))
+          fs.writeFileSync(SESSION_FILE, page.url(), 'utf8');
+        log('Recovered stable downloadable-file response after 15 seconds; collecting artifacts');
+        return state.text;
+      }
+    } else { stableDownloadText=downloadText; downloadTextSince=downloadText?Date.now():0; }
+    if(state.media && state.media===stableMedia) {
+      if(!mediaSince) mediaSince=Date.now();
+      if(Date.now()-mediaSince>=15000) {
+        const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
+        if(stop) await stop.click();
+        log('Recovered stable native media after 15 seconds; collecting artifacts');
+        return state.text || 'Mídia pronta.';
+      }
+    } else { stableMedia=state.media||''; mediaSince=state.media?Date.now():0; }
     if(state.envelope && state.envelope===stableEnvelope) {
       if(Date.now()-envelopeSince>=15000) {
         // A single complete machine envelope is the entire A0 response.
         // Quiesce this generation before releasing the serialized browser.
-        const stop=await page.$('button[data-testid="stop-button"]');
+        const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
         if(stop) await stop.click();
         // Some UI versions leave the stop control mounted after cancellation.
         // Verify the atomic payload, then detach this page from the old stream.
@@ -500,8 +1074,27 @@ async function startDaemonProcess() {
         userAgent: navigator.userAgent,
         languages: navigator.languages,
         hasChromeObject: Boolean(globalThis.chrome),
+        url: location.href,
+        lastAssistant: ([...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)?.innerText||'').slice(0,2000),
+        lastMedia: [...([...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)?.querySelectorAll('img[src],a[href]')||[])].map(el=>({tag:el.tagName,src:el.currentSrc||el.src||el.href||'',w:el.naturalWidth||0,h:el.naturalHeight||0,download:el.getAttribute('download')})).slice(-20),
+        turnSummary: [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].slice(-8).map(turn=>({
+          id:turn.getAttribute('data-testid'),
+          roles:[...turn.querySelectorAll('[data-message-author-role]')].map(el=>el.getAttribute('data-message-author-role')),
+          text:(turn.innerText||'').slice(0,500),
+          media:[...turn.querySelectorAll('img[src],a[href]')].map(el=>({tag:el.tagName,src:el.currentSrc||el.src||el.href||'',w:el.naturalWidth||0,h:el.naturalHeight||0})).filter(item=>item.tag==='A'||item.w>=128||item.h>=128).slice(-12),
+          controls:[...turn.querySelectorAll('button')].map(el=>el.getAttribute('aria-label')||el.getAttribute('data-testid')||el.innerText).filter(Boolean).slice(-12),
+        })),
+        busy: !!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]'),
+        bodyTail: (document.body?.innerText||'').slice(-5000),
+        controls: [...document.querySelectorAll('button')].map(b=>b.getAttribute('aria-label')||b.getAttribute('data-testid')||b.innerText).filter(Boolean).slice(-50),
+        downloadHtml: [...document.querySelectorAll('button')].filter(b=>(b.getAttribute('aria-label')||b.innerText||'').includes('Download file')).slice(-10).map(b=>b.outerHTML.slice(0,2000)),
       }));
       return send(200, { ok: true, browser: browserState });
+    }
+
+    if (req.method === 'POST' && req.url === '/collect-artifacts') {
+      try { return send(200,{ok:true,artifacts:await collectAssistantArtifacts(page,log)}); }
+      catch(error) { return send(500,{ok:false,error:error.message}); }
     }
 
     if (req.method === 'POST' && req.url === '/stop') {
@@ -521,19 +1114,34 @@ async function startDaemonProcess() {
       req.on('data', chunk => (body += chunk));
       req.on('end', async () => {
         const {
-          fullPrompt, codeOnly, newChat, uploadPath, chatUrl,
+          fullPrompt, codeOnly, newChat, temporaryChat=false, uploadPath, uploadPaths, chatUrl, expectedArtifact,
           reloadBeforeAttempt=false, requestTimeoutMs=REQUEST_TIMEOUT,
         } = JSON.parse(body);
         const boundedRequestTimeout=Math.max(
           1_000,
-          Math.min(REQUEST_TIMEOUT, Number(requestTimeoutMs) || REQUEST_TIMEOUT)
+          Math.min(MAX_REQUEST_TIMEOUT, Number(requestTimeoutMs) || REQUEST_TIMEOUT)
         );
         const requestDeadline=Date.now()+boundedRequestTimeout;
         const remainingTimeout=(cap=60_000)=>Math.max(
           1_000,
           Math.min(cap, requestDeadline-Date.now())
         );
-        log(`ask: newChat=${newChat} reload=${reloadBeforeAttempt} budgetMs=${boundedRequestTimeout} codeOnly=${codeOnly} upload=${uploadPath||'none'} chatUrl=${chatUrl||'none'} len=${fullPrompt.length}`);
+        const requestUploads=[...new Set([...(Array.isArray(uploadPaths)?uploadPaths:[]),...(uploadPath?[uploadPath]:[])])];
+        const safeExpected=typeof expectedArtifact==='string' && /^[A-Za-z0-9._-]+$/.test(expectedArtifact)
+          ? expectedArtifact : '';
+        const textArtifactMatches=[...fullPrompt.matchAll(/\b([A-Za-z0-9._-]+\.(?:txt|md|json|xml|ya?ml|html?|svg|py|js|ts|jsx|tsx|java|c|cpp|h|hpp|cs|go|rs|php|rb|sh|ps1|bat|sql|css|toml|ini|cfg|conf|log|gltf|obj|ply|stl|dae|dxf|feather))\b/ig)];
+        // Prefer the filename explicitly derived by the gateway from the
+        // latest real user turn. Searching the whole protocol transcript used
+        // to select stale filenames embedded in old tool output.
+        const textArtifactMatch=safeExpected
+          ? [safeExpected,safeExpected]
+          : (/\b(?:crie|criar|create|generate|gere|arquivo|file|anexo|attachment|download|baix[aá]vel)\b/i.test(fullPrompt)
+              ? textArtifactMatches.at(-1) : null);
+        const artifactEnvelopeInstruction=textArtifactMatch
+          ? `\n\nCompatibility requirement: also include the exact bytes of ${textArtifactMatch[1]} as standard base64 using exactly this envelope (in addition to the normal attachment):\nA0_ARTIFACT_BASE64_BEGIN ${textArtifactMatch[1]}\n<base64 without commentary>\nA0_ARTIFACT_BASE64_END`
+          : '';
+        const promptToSend=fullPrompt+artifactEnvelopeInstruction;
+        log(`ask: newChat=${newChat} reload=${reloadBeforeAttempt} budgetMs=${boundedRequestTimeout} codeOnly=${codeOnly} uploads=${requestUploads.map(p=>path.basename(p)).join(',')||'none'} chatUrl=${chatUrl||'none'} len=${promptToSend.length}`);
 
         try {
           if (reloadBeforeAttempt) {
@@ -570,6 +1178,7 @@ async function startDaemonProcess() {
               waitUntil:'domcontentloaded',
               timeout:remainingTimeout(),
             });
+            if(temporaryChat) await enableTemporaryChat(page,log);
             await resetNewChatComposer(page, log);
             await page.waitForFunction(() => !document.querySelector('[data-message-author-role="assistant"]')
               && !!document.querySelector('#prompt-textarea'), {timeout:remainingTimeout()});
@@ -589,22 +1198,61 @@ async function startDaemonProcess() {
           }
           // else: already on the right chat page, skip navigation entirely
 
+          // Requests are serialized. Therefore a stop-generation control that
+          // is already present before this request starts cannot belong to the
+          // new request; it is a stale UI remnant from the completed previous
+          // turn. Quiesce it and reload this same mapped chat once so the next
+          // prompt can actually be submitted.
+          if(chatUrl) {
+            const staleStop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
+            if(staleStop) {
+              log('Stale generation control detected before submission; stopping it and reloading the same mapped chat');
+              await staleStop.click().catch(()=>{});
+              await new Promise(r=>setTimeout(r,500));
+              await page.reload({waitUntil:'domcontentloaded',timeout:remainingTimeout()});
+              await page.waitForSelector('#prompt-textarea',{timeout:remainingTimeout()});
+              if(page.url().split('?')[0]!==chatUrl) throw new Error('Stale-generation recovery left the mapped conversation');
+            }
+          }
+
+          // A generated-file preview or a partially hydrated ChatGPT route can
+          // leave the mapped conversation visible but remove/hide the composer.
+          // Do not spend the entire response-start budget waiting on that
+          // broken page. First dismiss overlays, then reload this same chat once
+          // only when the composer is still unavailable after a bounded probe.
+          await dismissBlockingOverlays(page, log);
+          const composerReady=await page.waitForFunction(()=>{
+            const el=document.querySelector('#prompt-textarea');
+            return el && el.getBoundingClientRect().height>0 && (el.isContentEditable || el.tagName==='TEXTAREA');
+          },{timeout:8_000,polling:250}).then(()=>true).catch(()=>false);
+          if(!composerReady) {
+            if(!chatUrl) throw new Error('ChatGPT composer unavailable on the new-chat page');
+            log('Mapped chat has no usable composer after 8s; reloading this same conversation once');
+            await page.reload({waitUntil:'domcontentloaded',timeout:remainingTimeout()});
+            await page.waitForFunction(()=>{
+              const el=document.querySelector('#prompt-textarea');
+              return el && el.getBoundingClientRect().height>0 && (el.isContentEditable || el.tagName==='TEXTAREA');
+            },{timeout:remainingTimeout(),polling:250});
+            if(page.url().split('?')[0]!==chatUrl) throw new Error('Composer recovery left the mapped conversation');
+            await dismissBlockingOverlays(page, log);
+          }
+
           // Attach first. Uploading causes ChatGPT to re-render the composer;
           // text inserted before that re-render can remain visible in the DOM
           // while being absent from React's submission state.
-          if (uploadPath) {
-            await uploadFileToChatGPT(page, uploadPath, log);
+          if (requestUploads.length) {
+            await uploadFilesToChatGPT(page, requestUploads, log);
           }
 
           await dismissBlockingOverlays(page, log);
-          await fillTextarea(page, fullPrompt);
+          await fillTextarea(page, promptToSend);
           const inserted = await page.$eval('#prompt-textarea', el => el.value ?? el.innerText);
           // ProseMirror renders paragraphs as doubled line breaks in innerText.
           // JSON transcript newlines are escaped, so normalize only DOM line
           // separators, not spaces/indentation inside transcript values.
           const normalizeComposer = s => s.replace(/\r/g,'').replace(/\n+/g,'\n').trim();
-          if (normalizeComposer(inserted) !== normalizeComposer(fullPrompt)) {
-            const a=normalizeComposer(inserted), b=normalizeComposer(fullPrompt);
+          if (normalizeComposer(inserted) !== normalizeComposer(promptToSend)) {
+            const a=normalizeComposer(inserted), b=normalizeComposer(promptToSend);
             let at=0; while(at<Math.min(a.length,b.length)&&a[at]===b[at]) at++;
             log(`Composer mismatch lengths=${a.length}/${b.length} offset=${at} codepoints=${a.charCodeAt(at)}/${b.charCodeAt(at)}`);
             throw new Error('Composer did not preserve the complete prompt; refusing to send partial context');
@@ -615,7 +1263,7 @@ async function startDaemonProcess() {
           // button stays disabled until that upload finishes.  Clicking a disabled
           // button does nothing, which is what caused the previous silent failures.
           const submitStartPath = new URL(page.url()).pathname;
-          if (uploadPath) {
+          if (requestUploads.length) {
             log('Waiting for send button to become enabled (file upload in progress)...');
             await page.waitForFunction(
               () => {
@@ -649,11 +1297,11 @@ async function startDaemonProcess() {
           if(capacityRejection) throw new Error(`ChatGPT rejected the request: ${capacityRejection}`);
           await dismissBlockingOverlays(page, log);
           await page.click('button[data-testid="send-button"]');
-          log(uploadPath
+          log(requestUploads.length
             ? 'Submitted via DOM send action after attachment and composer refresh'
             : 'Submitted via verified DOM send action');
-          await page.waitForFunction(
-            ({startPath,beforeUser}) => {
+          const waitForSubmissionAck=()=>page.waitForFunction(
+            ({startPath,beforeUser,temporaryChat}) => {
               const editor = document.querySelector('#prompt-textarea');
               const text = (editor?.value ?? editor?.innerText ?? '').trim();
               const currentUser=[...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null;
@@ -661,11 +1309,31 @@ async function startDaemonProcess() {
               // click while React transiently redraws it. Require a new user
               // turn (or a new-chat navigation plus a user turn) as evidence.
               return !text && currentUser && currentUser!==beforeUser
-                && (startPath!=='/' || location.pathname.startsWith('/c/'));
+                && (temporaryChat || startPath!=='/' || location.pathname.startsWith('/c/'));
             },
             { timeout: 15_000, polling: 250 },
-            {startPath:submitStartPath,beforeUser:beforeTurn.user}
-          ).catch(async () => {
+            {startPath:submitStartPath,beforeUser:beforeTurn.user,temporaryChat}
+          ).then(()=>true).catch(()=>false);
+          let acknowledged=await waitForSubmissionAck();
+          if(!acknowledged) {
+            const retryState=await page.evaluate(beforeUser=>{
+              const editor=document.querySelector('#prompt-textarea');
+              const currentUser=[...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null;
+              return {composerChars:String(editor?.value ?? editor?.innerText ?? '').trim().length,currentUser,beforeUser};
+            },beforeTurn.user).catch(()=>({composerChars:0,currentUser:null,beforeUser:beforeTurn.user}));
+            // A long-lived ChatGPT tab can occasionally ignore a pointer click
+            // even though its send button is enabled. Only retry when the full
+            // draft is still present and no new user turn exists, which makes
+            // the fallback idempotent and avoids duplicate messages.
+            if(retryState.composerChars>0 && retryState.currentUser===retryState.beforeUser) {
+              log(`Send click was ignored with ${retryState.composerChars} draft chars; retrying once via focused Enter`);
+              await dismissBlockingOverlays(page,log);
+              await page.focus('#prompt-textarea');
+              await page.keyboard.press('Enter');
+              acknowledged=await waitForSubmissionAck();
+            }
+          }
+          if(!acknowledged) {
             await page.screenshot({path: path.join(STATE_DIR, 'submission-failure.png'), fullPage: false}).catch(() => {});
             const delayedRejection=await readProviderRejection(page);
             if(delayedRejection) throw new Error(`ChatGPT rejected the request: ${delayedRejection}`);
@@ -679,7 +1347,7 @@ async function startDaemonProcess() {
                 sendLabel: sendButton?.getAttribute('aria-label') ?? null,
                 files: [...document.querySelectorAll('[data-testid*="file"], [class*="attachment"]')].length,
                 alerts: [...document.querySelectorAll('[role="alert"]')].map(el => el.innerText.trim()).filter(Boolean).slice(-3),
-                capacityText: (document.body?.innerText||'').match(/(?:Messages limit reached|You(?:'|’)ve reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado))[^\n]*/i)?.[0]||'',
+                capacityText: (document.body?.innerText||'').match(/(?:Messages limit reached|You(?:'|’)ve reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations)[^\n]*/i)?.[0]||'',
                 buttons: [...document.querySelectorAll('button')].map(el => ({
                   testid: el.getAttribute('data-testid'),
                   label: el.getAttribute('aria-label'),
@@ -690,7 +1358,13 @@ async function startDaemonProcess() {
             if(state.capacityText) throw new Error(`ChatGPT rejected the request: ${state.capacityText}`);
             log(`Submission not acknowledged: ${JSON.stringify(state)}`);
             throw new Error('Prompt submission was not acknowledged');
-          });
+          }
+          const submittedUserTurnId=await page.evaluate(()=>
+            [...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)
+              ?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null
+          );
+          if(!submittedUserTurnId || submittedUserTurnId===beforeTurn.user)
+            throw new Error('Submitted user turn identity could not be verified');
 
           const immediateRejection=await readProviderRejection(page);
           if(immediateRejection) throw new Error(`ChatGPT rejected the request: ${immediateRejection}`);
@@ -700,7 +1374,7 @@ async function startDaemonProcess() {
           // reload and retry in this same conversation instead of opening a
           // second unrelated chat.
           const submittedUrl=page.url().split('?')[0];
-          if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(submittedUrl)) {
+          if (!temporaryChat && /^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(submittedUrl)) {
             fs.writeFileSync(SESSION_FILE, submittedUrl, 'utf8');
           }
 
@@ -709,11 +1383,12 @@ async function startDaemonProcess() {
             page,
             log,
             beforeTurn.assistant,
-            requestDeadline
+            requestDeadline,
+            submittedUserTurnId
           );
 
           const finalUrl = page.url();
-          if (finalUrl.startsWith('https://chatgpt.com/c/')) {
+          if (!temporaryChat && finalUrl.startsWith('https://chatgpt.com/c/')) {
             fs.writeFileSync(SESSION_FILE, finalUrl, 'utf8');
           }
 
@@ -721,8 +1396,25 @@ async function startDaemonProcess() {
           if (!raw) throw new Error('Could not extract response from page');
 
           const output = codeOnly ? extractCodeBlocks(raw) : raw;
-          log(`Done: ${output.length} chars`);
-          send(200, { ok: true, response: output });
+          log(`Done: ${output.length} chars; preview=${String(output).replace(/\s+/g,' ').slice(0,500)}`);
+          const responseTurnId=await page.evaluate(()=>[...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
+            .filter(turn=>!turn.querySelector('[data-message-author-role="user"]')).at(-1)?.getAttribute('data-testid')||null);
+          const artifacts=await collectAssistantArtifacts(page,log,responseTurnId);
+          if(artifacts.length) {
+            const stillBusy=await page.evaluate(()=>!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]')).catch(()=>false);
+            if(stillBusy) {
+              const current=page.url().split('?')[0];
+              if(/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(current)) fs.writeFileSync(SESSION_FILE,current,'utf8');
+              await page.goto('about:blank',{waitUntil:'domcontentloaded',timeout:10000});
+              log('Detached from a completed artifact turn whose stop control remained mounted');
+            }
+          }
+          if(temporaryChat) {
+            await page.goto('about:blank',{waitUntil:'domcontentloaded',timeout:10_000}).catch(()=>{});
+            if(fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+            log('Temporary audit tab closed and session pointer removed.');
+          }
+          send(200, { ok: true, response: output, artifacts, temporary:temporaryChat });
         } catch (err) {
           log(`Error: ${err.message}`);
           // Return the URL owned by this exact request.  The global session
@@ -732,6 +1424,11 @@ async function startDaemonProcess() {
           const requestChatUrl = /^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(currentChatUrl)
             ? currentChatUrl
             : null;
+          if(temporaryChat) {
+            await page.goto('about:blank',{waitUntil:'domcontentloaded',timeout:10_000}).catch(()=>{});
+            if(fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+            log('Failed temporary audit tab closed and session pointer removed.');
+          }
           send(500, { ok: false, error: err.message, chatUrl: requestChatUrl });
         } finally {
           busy = false;
@@ -802,9 +1499,29 @@ function httpPost(port, endpoint, body) {
   });
 }
 
+function probeDaemon(port, timeoutMs=1_500) {
+  return new Promise(resolve => {
+    const req=http.get({hostname:'127.0.0.1',port,path:'/status'},res=>{
+      let raw='';
+      res.on('data',chunk=>(raw+=chunk));
+      res.on('end',()=>{
+        try { resolve(res.statusCode===200 && JSON.parse(raw).ok===true); }
+        catch { resolve(false); }
+      });
+    });
+    req.setTimeout(timeoutMs,()=>req.destroy());
+    req.on('error',()=>resolve(false));
+  });
+}
+
 async function ensureDaemon() {
   let state = readDaemonState();
-  if (state) return state.port;
+  if (state && await probeDaemon(state.port)) return state.port;
+
+  // The state directory survives Docker recreation. A PID can be reused by an
+  // unrelated process in the new container, so PID liveness alone cannot
+  // validate an old ephemeral port. Require the daemon's own /status response.
+  if(state) process.stderr.write(`[*] Discarding stale daemon endpoint on port ${state.port}.\n`);
 
   if (fs.existsSync(MANUAL_LOGIN_FILE)) {
     throw new Error('Manual ChatGPT login is active in VNC. Finish the login and close the manual Chrome window before using this model.');
@@ -862,9 +1579,9 @@ async function login() {
 function parseArgs(argv) {
   const args = argv.slice(2);
   const opts = {
-    login: false, codeOnly: false, file: null, upload: null, save: null,
-    git: false, context: null, newChat: false, chatUrl: null, stop: false, status: false,
-    daemonInternal: false, cwd: null, prompt: [], rawStdin: false,
+    login: false, codeOnly: false, file: null, upload: [], save: null,
+    git: false, context: null, newChat: false, temporaryChat: false, chatUrl: null, stop: false, status: false,
+    warm: false, daemonInternal: false, cwd: null, prompt: [], rawStdin: false,
   };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -872,13 +1589,15 @@ function parseArgs(argv) {
       case '--code':            opts.codeOnly       = true;  break;
       case '--git':             opts.git            = true;  break;
       case '--new':             opts.newChat        = true;  break;
+      case '--temporary':       opts.temporaryChat  = true; opts.newChat = true; break;
       case '--chat-url':          opts.chatUrl   = args[++i];    break;
       case '--raw-stdin':       opts.rawStdin       = true;  break;
       case '--stop':            opts.stop           = true;  break;
       case '--status':          opts.status         = true;  break;
+      case '--warm':            opts.warm           = true;  break;
       case '--daemon-internal': opts.daemonInternal = true;  break;
       case '--file':            opts.file    = args[++i];    break;
-      case '--upload':          opts.upload  = args[++i];    break;
+      case '--upload':          opts.upload.push(args[++i]); break;
       case '--save':            opts.save    = args[++i];    break;
       case '--context':         opts.context = args[++i];    break;
       case '--cwd':             opts.cwd     = args[++i];    break;
@@ -894,6 +1613,7 @@ Usage:
   node chatgpt.js --login                               # first-time setup
   node chatgpt.js "prompt"                              # continue last chat (daemon auto-starts)
   node chatgpt.js --new "prompt"                        # force a new chat
+  node chatgpt.js --temporary "prompt"                  # isolated ChatGPT temporary chat
   node chatgpt.js --code "write fizzbuzz in Go"         # extract code blocks only
   node chatgpt.js --file <path> "prompt"                # paste file content as text in prompt
   node chatgpt.js --upload <path> "prompt"              # upload file via ChatGPT attachment button
@@ -902,6 +1622,7 @@ Usage:
   node chatgpt.js --context "we use Fiber v2" "prompt"  # inline context
   cat error.log | node chatgpt.js "what is wrong"       # pipe input
   node chatgpt.js --status                              # check if daemon is running
+  node chatgpt.js --warm                                # start/check daemon without sending a prompt
   node chatgpt.js --stop                                # shut down the daemon
 `);
 }
@@ -939,6 +1660,12 @@ Usage:
     return;
   }
 
+  if (opts.warm) {
+    const port=await ensureDaemon();
+    console.log(`[*] Daemon ready on port ${port}.`);
+    return;
+  }
+
   if (opts.prompt.length === 0 && !opts.rawStdin) {
     printHelp();
     process.exit(1);
@@ -954,13 +1681,26 @@ Usage:
   if (!fullPrompt) throw new Error('Empty prompt');
 
   try {
-    const port   = await ensureDaemon();
-    const result = await httpPost(port, '/ask', {
-      fullPrompt, codeOnly: opts.codeOnly, newChat: opts.newChat, chatUrl: opts.chatUrl,
-      uploadPath: opts.upload || null,
+    let port = await ensureDaemon();
+    const askBody = {
+      fullPrompt, codeOnly: opts.codeOnly, newChat: opts.newChat, temporaryChat:opts.temporaryChat, chatUrl: opts.chatUrl,
+      uploadPaths: opts.upload,
       reloadBeforeAttempt: process.env.BROWSER_RECOVERY_RELOAD === '1',
       requestTimeoutMs: Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || REQUEST_TIMEOUT),
-    });
+      expectedArtifact: process.env.BROWSER_EXPECTED_ARTIFACT || '',
+    };
+    let result;
+    try {
+      result=await httpPost(port,'/ask',askBody);
+    } catch(error) {
+      if(!['ECONNREFUSED','ECONNRESET','EPIPE'].includes(error.code)) throw error;
+      // The daemon can disappear between the readiness probe and POST. Recover
+      // once in-process so Agent Zero never sees a transient stale-port error.
+      if(fs.existsSync(DAEMON_FILE)) fs.unlinkSync(DAEMON_FILE);
+      process.stderr.write(`[*] Daemon connection ${error.code}; reconnecting once.\n`);
+      port=await ensureDaemon();
+      result=await httpPost(port,'/ask',askBody);
+    }
     if (!result.ok) {
       const chatUrlMarker = result.chatUrl ? ` CHATGPT_REQUEST_URL=${result.chatUrl}` : '';
       throw new Error((result.error || 'Daemon returned an error') + chatUrlMarker);
@@ -968,6 +1708,9 @@ Usage:
     console.log('\n--- RESPONSE ---');
     console.log(result.response);
     console.log('--- END ---\n');
+    console.log('--- ARTIFACTS ---');
+    console.log(JSON.stringify(result.artifacts||[]));
+    console.log('--- END ARTIFACTS ---');
     if (opts.save) {
       fs.writeFileSync(path.resolve(opts.save), result.response, 'utf8');
       console.error(`[*] Response saved to: ${path.resolve(opts.save)}`);

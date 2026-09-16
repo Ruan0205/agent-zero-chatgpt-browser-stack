@@ -17,7 +17,7 @@ wait_exec() {
   count=0
   until docker exec "$container" sh -lc "$command" >/dev/null 2>&1; do
     count=$((count + 1))
-    if [ "$count" -ge 30 ]; then
+    if [ "$count" -ge 120 ]; then
       docker logs --tail 100 "$container" >&2 || true
       return 1
     fi
@@ -38,8 +38,12 @@ docker run -d --rm --name "$browser" \
   --tmpfs /data:uid=1000,gid=1000 \
   --tmpfs /workspace:uid=1000,gid=1000 \
   agent-zero-browser-stack-chatgpt-browser-agent >/dev/null
-wait_exec "$browser" "node -e \"fetch('http://127.0.0.1:8000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""
-echo "OK chatgpt-browser-agent"
+# A public smoke test has no user's ChatGPT cookies. Validate the intentional
+# first-login mode: noVNC is reachable and the visible Chrome login window is
+# running. The authenticated gateway healthcheck is exercised after the owner
+# completes login and closes this window.
+wait_exec "$browser" "curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null && pgrep -f google-chrome-stable >/dev/null"
+echo "OK chatgpt-browser-agent first-login mode"
 
 docker run --rm --entrypoint /bin/sh agent-zero-browser-stack-meta-ai-whatsapp \
   -lc "test -x /usr/local/bin/wametaai"

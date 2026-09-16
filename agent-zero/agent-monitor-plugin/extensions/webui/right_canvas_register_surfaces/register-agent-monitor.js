@@ -39,7 +39,7 @@ async function monitorUrl() {
   const config = await runtimeConfig();
   if (!config.password) throw new Error("A credencial automática do VNC não foi configurada.");
   const url = new URL(window.location.href);
-  url.port = String(config.port || "50081");
+  url.port = "50081";
   url.pathname = "/vnc.html";
   url.search = "";
   url.hash = "";

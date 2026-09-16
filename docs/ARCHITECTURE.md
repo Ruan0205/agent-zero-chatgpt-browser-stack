@@ -16,7 +16,11 @@ O serviço executa Google Chrome em Xvfb, com fluxbox e x11vnc. websockify/noVNC
 
 O adaptador converte mensagens do Agent Zero em uma instrução compacta para o ChatGPT, exige uma resposta estruturada e a devolve como streaming OpenAI-compatible. O plugin `browser_session_bridge` acrescenta um identificador derivado do chat atual, permitindo uma conversa web independente para cada chat do Agent Zero.
 
-O gateway mantém fila interna, acompanha a URL da conversa, trata navegação, recarrega somente em recuperação e aplica duas tentativas espaçadas para 429. O perfil Chrome, os cookies e a última URL ficam no volume `data/browser`.
+O gateway inicia duas instâncias permanentes. Cada chat do Agent Zero permanece associado à sua própria URL e instância; demandas adicionais criam instâncias elásticas que só expiram após 30 minutos sem uso. Antes de cada envio o pool confirma a afinidade, impedindo que uma mensagem seja publicada na conversa web errada.
+
+O contexto longo é mantido pelo próprio ChatGPT. O Agent Zero envia somente o delta necessário, o contrato de ferramentas e a solicitação atual. A página não é atualizada a cada mensagem: há reload na criação/recuperação, duas novas tentativas após 429 com espera de 30 segundos e keep-alive SSE enquanto operações longas são processadas. Artefatos são capturados da resposta HTTP autenticada disparada pelo controle exato daquela resposta e gravados no outbox compartilhado, mesmo quando a UI omite parâmetros opcionais do nome do download.
+
+O perfil Chrome, cookies, mapa chat↔URL, pool, outbox e incidentes ficam sob `data/browser`. O auditor opcional usa uma conversa temporária não listada para classificar a resposta final, evita auditar a si próprio e remove a conversa temporária ao terminar.
 
 ### Presets
 
@@ -45,7 +49,9 @@ O método previsto para comandos no host é `nsenter` usando namespaces em `/hos
 Há dois estados separados:
 
 1. O plugin de WhatsApp do Agent Zero usa `data/whatsapp` e permite self-chat, anexos e respostas do agente.
-2. `meta-ai-whatsapp` usa `data/meta-ai-whatsapp`, pareia com um número próprio e expõe endpoints OpenAI-compatible somente na rede Docker. O plugin `_meta_ai_image` chama esse serviço para geração e edição de imagens.
+2. `meta-ai-whatsapp` usa `data/meta-ai-whatsapp`, pareia com um número próprio e expõe endpoints OpenAI-compatible somente na rede Docker. O plugin `_meta_ai_image` chama esse serviço para geração e edição de imagens. O pareamento é opcional e aparece em **Settings > External > Meta AI WhatsApp Bridge**, ao lado da configuração do WhatsApp; abrir a tela não conecta conta alguma.
+
+O modelo `chatgpt-browser` usa a criação/edição nativa do ChatGPT e não roteia imagens pela Meta AI. Modelos Featherless só usam a bridge Meta AI quando ela está pareada e a ferramenta é selecionada.
 
 Nenhuma sessão é incluída no Git.
 
@@ -63,6 +69,8 @@ O painel noVNC busca esse JSON por uma rota do Agent Zero protegida pelo login e
 ## Inicialização e recuperação
 
 Todos os serviços duradouros usam `restart: unless-stopped`. O Agent Zero espera bootstrap, queue, VS Code e ChatGPT Browser estarem prontos. Após reinício do host, o Docker restaura a stack se o daemon estiver habilitado (`systemctl enable --now docker`).
+
+A imagem customizada do Agent Zero v2.12 mescla os arquivos oficiais ausentes de `/git/agent-zero` em `/a0` durante o build. Isso evita o boot-loop observado em recriações limpas quando o runtime já contém `run_ui.py`, mas ainda não contém plugins oficiais que o core importa.
 
 ## Fronteiras de dados
 

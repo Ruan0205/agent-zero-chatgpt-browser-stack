@@ -47,6 +47,10 @@ const SESSION_DIR = getArg('session', path.join(DEFAULT_DATA_ROOT, 'session'));
 const CACHE_DIR = getArg('cache-dir', path.join(DEFAULT_DATA_ROOT, 'media'));
 const PAIR_ONLY = args.includes('--pair-only');
 const MODE = getArg('mode', 'self-chat'); // "dedicated" or "self-chat"
+const ALLOWED_NUMBERS = new Set(
+  getArg('allowed-numbers', '').split(',').map(number => numOf(number).replace(/\D/g, '').replace(/^0+/, '')).filter(Boolean),
+);
+const ALLOW_GROUP = getArg('allow-group', 'false') === 'true';
 // Meta AI is the only non-self chat that the image automation may contact.
 // The target is intentionally server-side and cannot be overridden by callers.
 const META_AI_NUMBER = String(process.env.META_AI_WHATSAPP_NUMBER || '13135550002').replace(/\D/g, '');
@@ -369,6 +373,14 @@ async function startSocket() {
         msg.message.documentMessage = msg.message.documentWithCaptionMessage.message.documentMessage;
       }
 
+      // v2.12 authorization checks, with an explicit exception for the
+      // isolated Meta AI image workflow. Apply them before downloading media.
+      const resolvedSender = resolveNumber(senderNumber);
+      const normalizedSender = resolvedSender.replace(/\D/g, '').replace(/^0+/, '');
+      const isMetaAiMessage = isMetaAiJid(chatId) || isMetaAiJid(senderId);
+      if (!isMetaAiMessage && ALLOWED_NUMBERS.size > 0 && !ALLOWED_NUMBERS.has(normalizedSender)) continue;
+      if (isGroup && !ALLOW_GROUP) continue;
+
       // Extract message body
       let body = '';
       let hasMedia = false;
@@ -430,9 +442,15 @@ async function startSocket() {
             const docMsg = msg.message.documentMessage;
             const fileName = docMsg?.fileName || '';
             if (fileName) {
-              // Use original filename for documents
-              const filePath = path.join(CACHE_DIR, `${randomBytes(4).toString('hex')}_${fileName}`);
-              writeFileSync(filePath, buf);
+              // Preserve the display name without letting remote metadata
+              // select a directory (v2.12 path traversal hardening).
+              const safeName = path.basename(fileName.replace(/\\/g, '/'));
+              const filePath = path.resolve(CACHE_DIR, `${randomBytes(4).toString('hex')}_${safeName}`);
+              const relativePath = path.relative(path.resolve(CACHE_DIR), filePath);
+              if (!safeName || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+                throw new Error('Unsafe document filename');
+              }
+              writeFileSync(filePath, buf, { flag: 'wx' });
               mediaUrls.push(filePath);
               if (!body) body = fileName;
             } else {
@@ -444,7 +462,7 @@ async function startSocket() {
           // Write file if not already handled (document with fileName)
           if (mediaUrls.length === 0) {
             const filePath = path.join(CACHE_DIR, `${prefix}_${randomBytes(6).toString('hex')}${ext}`);
-            writeFileSync(filePath, buf);
+            writeFileSync(filePath, buf, { flag: 'wx' });
             mediaUrls.push(filePath);
           }
         } catch (err) {
@@ -532,9 +550,6 @@ async function startSocket() {
           try { console.log(JSON.stringify({ event: 'mention_reply_check', myNums: [...myNums], mentionedJids, mentionedMe, repliedToMe, stanzaId: contextInfo?.stanzaId })); } catch {}
         }
       }
-
-      // Resolve sender number (LID -> phone if possible)
-      const resolvedSender = resolveNumber(senderNumber);
 
       // Resolve group name from metadata cache or fetch
       let chatName;

@@ -1,14 +1,113 @@
 'use strict';
 
+const fs = require('fs');
+
+let localAgentContextCache;
+
+function localAgentContext() {
+  if (localAgentContextCache !== undefined) return localAgentContextCache;
+  const contextFile = String(process.env.CHATGPT_BROWSER_LOCAL_CONTEXT_FILE || '').trim();
+  if (!contextFile) return (localAgentContextCache = '');
+  try {
+    localAgentContextCache = fs.readFileSync(contextFile, 'utf8').trim().slice(0, 12000);
+  } catch (error) {
+    console.warn(`[bridge] optional local agent context unavailable: ${error.message}`);
+    localAgentContextCache = '';
+  }
+  return localAgentContextCache;
+}
+
+function stripBrowserAttachmentMarker(value) {
+  return String(value||'').replace(/\n?\[A0_BROWSER_ATTACHMENTS_JSON\]\s*\[[^\r\n]*\]/g,'').trimEnd();
+}
+
 function textContent(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return content == null ? '' : JSON.stringify(content);
   return content.map(p => {
     if (typeof p === 'string') return p;
     if (['text', 'input_text', 'output_text'].includes(p?.type)) return p.text || '';
-    if (['image_url', 'input_image'].includes(p?.type)) throw new Error('Browser bridge cannot transmit image inputs; use the image integration or a vision provider.');
-    throw new Error('Unsupported message content type: ' + p?.type);
+    if (['image_url', 'input_image'].includes(p?.type)) return `[Attached image: ${p?.image_url?.url || p?.image_url || p?.url || 'image'}]`;
+    if (['input_file', 'file'].includes(p?.type)) return `[Attached file: ${p?.file_path || p?.file_url?.url || p?.file_url || p?.url || p?.filename || 'file'}]`;
+    return p == null ? '' : JSON.stringify(p);
   }).join('\n');
+}
+
+function attachmentInputs(body, priorState = null, options = {}) {
+  const messages=(body.messages||[]).filter(m=>m.role!=='system');
+  const hashes=messageHashes(body);
+  const previous=Array.isArray(priorState?.messageHashes)?priorState.messageHashes:null;
+  const appendOnly=previous && previous.length<=hashes.length && previous.every((v,i)=>v===hashes[i]);
+  let selected=messages;
+  if(options.browserOwnsHistory===true && appendOnly) selected=messages.slice(previous.length);
+  else if(options.browserOwnsHistory===true && priorState) selected=messages.slice(-1);
+  else if(options.browserOwnsHistory===true) {
+    const current=currentTurnTranscript((body.messages||[]).map(m=>({role:m.role,content:m.content,name:m.name}))).filter(m=>m.role!=='system');
+    selected=current;
+  }
+  const refs=[];
+  const seen=new Set();
+  const add=value=>{
+    if(typeof value!=='string') return;
+    const v=value.trim();
+    if(!v || seen.has(v)) return;
+    if(v.startsWith('/a0/usr/') || v.startsWith('/workspace/') || v.startsWith('data:')) { seen.add(v); refs.push(v); }
+  };
+  const visit=value=>{
+    if(value==null) return;
+    if(typeof value==='string') {
+      const s=value.trim();
+      for(const match of s.matchAll(/\[A0_BROWSER_ATTACHMENTS_JSON\]\s*(\[[^\r\n]*\])/g)) {
+        try {
+          const paths=JSON.parse(match[1]);
+          if(Array.isArray(paths)) paths.forEach(add);
+        } catch {}
+      }
+      let parsedStructured=false;
+      if((s.startsWith('{')||s.startsWith('[')) && s.length<8_000_000) {
+        try {
+          const parsed=JSON.parse(s);
+          const emittedTool=String(parsed?._tool_name||parsed?.tool_name||parsed?.tool_result?._tool_name||parsed?.tool_result?.tool_name||'').toLowerCase();
+          if(emittedTool==='chatgpt_browser_media') return;
+          visit(parsed);
+          parsedStructured=true;
+        } catch {}
+      }
+      // Agent Zero's first user turn is commonly serialized as a fenced JSON
+      // object. Parse top-level objects even when prose/fences surround them;
+      // otherwise attachments only appear on a later tool round-trip.
+      if(!parsedStructured && s.length<8_000_000) {
+        for(const parsed of topLevelJsonObjects(s)) visit(parsed);
+      }
+      const lastHuman=s.lastIndexOf('Human: {');
+      // Free-form paths from old tool output must never become attachments on
+      // a later turn. Real structured attachment fields are handled by the
+      // object visitor below; this fallback exists only for Agent Zero's
+      // current Human: {...} protocol envelope.
+      if(lastHuman<0) return;
+      const attachmentScope=s.slice(lastHuman);
+      for(const match of attachmentScope.matchAll(/\/a0\/usr\/(?:uploads|chats|whatsapp\/media)\/[^"'\s\\]+/g)) add(match[0]);
+      return;
+    }
+    if(Array.isArray(value)) { value.forEach(visit); return; }
+    if(typeof value!=='object') return;
+    const emittedTool=String(value._tool_name||value.tool_name||'').toLowerCase();
+    // Files returned by ChatGPT are outputs for the user. They must not become
+    // implicit inputs to the next human request, otherwise ChatGPT may edit or
+    // resend an old artifact instead of creating the newly requested format.
+    if(emittedTool==='chatgpt_browser_media') return;
+    for(const [key,item] of Object.entries(value)) {
+      const k=key.toLowerCase();
+      if(['attachments','media_paths'].includes(k)) {
+        (Array.isArray(item)?item:[item]).forEach(entry=>typeof entry==='string'?add(entry):visit(entry));
+      } else if(['image_url','file_url'].includes(k)) {
+        if(typeof item==='string') add(item); else if(item && typeof item==='object') add(item.url||item.path||'');
+      } else if(['file_path','image_path','source_filename'].includes(k)) add(item);
+      else if(['content','raw_content','tool_result','user_message'].includes(k)) visit(item);
+    }
+  };
+  selected.forEach(m=>visit(m.content));
+  return refs.slice(0,20);
 }
 
 function isAgentTurn(body) {
@@ -33,9 +132,38 @@ function toolsHash(body) {
   return require('crypto').createHash('sha256').update(JSON.stringify(body.tools)).digest('hex');
 }
 
+function topLevelJsonObjects(text) {
+  const objects=[];
+  let start=-1, depth=0, quoted=false, escaped=false;
+  for(let i=0;i<text.length;i++) {
+    const ch=text[i];
+    if(quoted) {
+      if(escaped) escaped=false;
+      else if(ch==='\\') escaped=true;
+      else if(ch==='"') quoted=false;
+      continue;
+    }
+    if(ch==='"') { quoted=true; continue; }
+    if(ch==='{') { if(depth===0) start=i; depth++; continue; }
+    if(ch==='}'&&depth>0) {
+      depth--;
+      if(depth===0&&start>=0) {
+        try { objects.push(JSON.parse(text.slice(start,i+1))); } catch {}
+        start=-1;
+      }
+    }
+  }
+  return objects.filter(value=>value&&typeof value==='object'&&!Array.isArray(value));
+}
+
 function isCurrentUserMessage(message) {
   if (message?.role !== 'user') return false;
   const text=textContent(message.content);
+  // Agent Zero may serialize a failed tool result and the user's retry as two
+  // adjacent top-level envelopes in one USER-role message. Recognize that
+  // boundary before the outer tool_result check; a user_message nested inside
+  // the tool result itself does not have this `} {` top-level shape.
+  if(/\}\s*\{\s*["']user_message["']\s*:/s.test(text)) return true;
   // Tool output is carried in a USER-role protocol envelope. Its payload may
   // itself contain serialized chats and nested "user_message" keys, so the
   // outer protocol keys must always win.
@@ -46,7 +174,26 @@ function isCurrentUserMessage(message) {
         || Object.hasOwn(parsed,'messages_summary') || Object.hasOwn(parsed,'tool_error')) return false;
       if(Object.hasOwn(parsed,'user_message')) return typeof parsed.user_message==='string';
     }
-  } catch {}
+  } catch {
+    // Agent Zero can append a fresh user envelope to the prior tool-result
+    // envelope in one protocol item. Respect the last complete top-level JSON
+    // object; never search inside a tool_result string or serialized dump.
+    const roots=topLevelJsonObjects(text);
+    const latest=roots.at(-1);
+    if(latest) {
+      if(Object.hasOwn(latest,'user_message')) return typeof latest.user_message==='string';
+      if(Object.hasOwn(latest,'tool_result') || Object.hasOwn(latest,'system_warning')
+        || Object.hasOwn(latest,'messages_summary') || Object.hasOwn(latest,'tool_error')) return false;
+    }
+    // Mixed serializers can make the preceding tool envelope invalid JSON
+    // (for example Python repr) while appending a valid user envelope. In
+    // that invalid-JSON branch, the final outer protocol key is authoritative.
+    const userKeys=[...text.matchAll(/["']user_message["']\s*:/ig)];
+    const toolKeys=[...text.matchAll(/["'](?:tool_result|system_warning|messages_summary|tool_error)["']\s*:/ig)];
+    const lastUser=userKeys.at(-1)?.index ?? -1;
+    const lastTool=toolKeys.at(-1)?.index ?? -1;
+    if(lastUser>lastTool) return true;
+  }
   const userAt=text.search(/[\"']user_message[\"']\s*:/i);
   const protocolAt=text.search(/[\"'](?:tool_result|system_warning|messages_summary|tool_error)[\"']\s*:/i);
   // Some compacted Agent Zero records prepend a plain summary before their
@@ -115,7 +262,7 @@ function leanAgentSystem(body, maxChars=18000) {
   const seen=new Set();
   for(const chunk of toolChunks) {
     const name=(chunk.match(/^### ([a-zA-Z0-9_-]+)\s*$/m)||[])[1];
-    if(!name || seen.has(name)) continue;
+    if(!name || seen.has(name) || name==='meta_ai_image') continue;
     seen.add(name);
     // The browser chat only needs the routing contract and the exact concise
     // schema. Detailed instructions remain available through skills_tool.
@@ -140,8 +287,12 @@ function extractedUserText(content) {
   let userText=content;
   try {
     const parsed=JSON.parse(content);
-    if(typeof parsed?.user_message==='string') return parsed.user_message;
-  } catch {}
+    if(typeof parsed?.user_message==='string') return stripBrowserAttachmentMarker(parsed.user_message);
+  } catch {
+    const roots=topLevelJsonObjects(content);
+    const latest=roots.at(-1);
+    if(typeof latest?.user_message==='string') return stripBrowserAttachmentMarker(latest.user_message);
+  }
   const matches=[...content.matchAll(/"user_message"\s*:\s*("(?:\\.|[^"\\])*")/g)];
   if(matches.length) {
     const selected=/^\s*Missing context\s*\{/i.test(content) ? matches[0] : matches.at(-1);
@@ -154,7 +305,7 @@ function extractedUserText(content) {
     const single=content.match(/[\"']user_message[\"']\s*:\s*'((?:\\.|[^'\\])*)'/s);
     if(single) userText=single[1].replace(/\\n/g,'\n').replace(/\\'/g,"'").replace(/\\\\/g,'\\');
   }
-  return userText;
+  return stripBrowserAttachmentMarker(userText);
 }
 
 function leanCurrentUserMessage(message) {
@@ -205,6 +356,15 @@ function operationalActionContext(body) {
   const evidence=/"tool_result"\s*:|\[TOOL\]|A0 .* output|tool (?:result|error)|Skill: [^\n]+\nPath:/i.test(after);
   const requiredTools=[];
   if(/\bcode_execution_tool\b/i.test(text) || (/\b(?:terminal|docker|container|servidor|server|host|serviço|servico|processo|arquivo|pasta|código|codigo|file|folder|service|process)\b/i.test(text) && !/\b(?:navegador|browser)\b/i.test(text))) requiredTools.push('code_execution_tool');
+  // A locally generated file is not delivered merely because a file:// link
+  // appears in prose. Require the publication tool whenever the latest user
+  // explicitly asks for a real downloadable attachment. This is especially
+  // important for large containers that must not be echoed as base64 through
+  // another model turn.
+  const attachmentDeliveryNegated=/\b(?:não|nao)\b[^.!?\n]{0,100}\b(?:devolva|entregue|anexe|publique|retorne|crie)\b[^.!?\n]{0,50}\b(?:arquivo|anexo)s?\b|\b(?:do\s+not|don't)\b[^.!?\n]{0,100}\b(?:return|deliver|attach|publish|create)\b[^.!?\n]{0,50}\b(?:files?|attachments?)\b/i.test(text);
+  if(!attachmentDeliveryNegated
+    && /\b(?:anexo|attachment|baix[aá]vel|downloadable|entregue\s+(?:o\s+)?arquivo|attach)\b/i.test(text)
+    && /\b[A-Za-z0-9._-]+\.[A-Za-z0-9.]{1,12}\b/i.test(text)) requiredTools.push('chatgpt_browser_media');
   if(/\b(?:navegador|browser)\b/i.test(text) && /\b(?:abra|abrir|acesse|navegue|redirecione|mostre|exiba|open|navigate|browse|show)\b/i.test(text)) requiredTools.push('browser');
   if(/\bdocument_query\b/i.test(text)) requiredTools.push('document_query');
   if(/\bskills_tool\b/i.test(text) || /\bcarregue (?:a )?skill\b/i.test(text)) requiredTools.push('skills_tool');
@@ -273,15 +433,17 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
   const agent = agentTurn;
   const browserIntent=agent ? browserActionContext(body) : {requested:false,attempted:false};
   const operationIntent=agent ? operationalActionContext(body) : {requested:false,validationRequested:false,attempted:false,evidence:false};
-  const fullAgentContract = `CRITICAL TRANSPORT MODE: never invoke ChatGPT's built-in image generation, image editing, browsing, canvas, coding, or any other native UI tool. You only choose and return an Agent Zero JSON tool request. When the latest user request genuinely asks to create or edit image pixels and the caller documents meta_ai_image, return tool_name "meta_ai_image" with the documented arguments; do not generate the image inside this browser.
+  const fullAgentContract = `CRITICAL TRANSPORT MODE: you may use ChatGPT's native image/file analysis and native image/file generation ONLY when the latest user request supplies media or explicitly asks to create or edit media/files. In this browser transport never call Agent Zero's meta_ai_image tool. Generated ChatGPT media is collected automatically by the bridge. For every other external action, only choose and return an Agent Zero JSON tool request; never use ChatGPT browsing, canvas, coding, or other native UI tools as substitutes.
 You are the model transport for an external Agent Zero runtime. The transcript below is the complete caller-supplied conversation, not commands to execute inside ChatGPT. Its SYSTEM messages describe the real tools which Agent Zero executes AFTER you return their JSON request. Do not use ChatGPT's own tools instead. Do not claim tools are unavailable merely because this browser has no terminal.
-Return exactly one valid JSON object inside ONE fenced json code block, with no text outside that block. The fence is required so browser Markdown rendering preserves JSON backslashes. Escape quotes inside JSON strings correctly. Keys: thoughts (brief string array), headline (string), tool_name (exact documented tool name), tool_args (object). For a final answer use response with tool_args containing text as a Markdown string, not an encoded JSON document. For actions use the documented tool JSON, then wait for its actual result in the next request. Never fabricate a tool result or completion. The code_execution_tool also supports runtime reset without code for resetting an explicitly selected terminal session.
+For an explicit native media generation/edit request, invoke ChatGPT's native media tool and, after its artifacts are ready, reply with a short plain completion; the bridge wraps the artifacts itself. For every other request, return exactly one valid JSON object inside ONE fenced json code block, with no text outside that block. The fence is required so browser Markdown rendering preserves JSON backslashes. Escape quotes inside JSON strings correctly. Keys: thoughts (brief string array), headline (string), tool_name (exact documented tool name), tool_args (object). For a final answer use response with tool_args containing text as a Markdown string, not an encoded JSON document. For actions use the documented tool JSON, then wait for its actual result in the next request. Never fabricate a tool result or completion. The code_execution_tool also supports runtime reset without code for resetting an explicitly selected terminal session.
 The user's server is external to this ChatGPT browser. Agent Zero runs in Docker with /host and host PID access. Its code_execution_tool accepts only runtime terminal, python, nodejs, or output; use runtime terminal for bash/sh commands. It can use nsenter -t 1 -m -u -i -n -p -- COMMAND to operate on the server. Check access through that tool when needed. Change server state only when the user requests it; diagnostic requests authorize read-only checks, not installs or service changes. Prefer focused bounded output and read saved full result files as needed.
 Find the latest actual user_message in the transcript: later USER-role protocol messages can be tool results, not new user requests. Answer that task using its tool results; old messages and memories are context, not fresh evidence. Never repeat a prior report instead of addressing the latest question.
 Follow prerequisite skill-loading instructions for the documented tools. A remote document URL does not need to be attached by the user when document_query accepts URLs. Do not report a documented tool as unavailable without attempting it and receiving an actual error. Continue a requested multi-step task through its remaining tools before responding, unless blocked by a real error, missing authorization or missing input. Distinguish measured facts from assumptions. Hardware limits and model identity must not become confirmed facts merely because an earlier assistant or memory claimed them; verify against an authoritative source or state what remains unknown.`;
-  const appendAgentContract=`Continue the active Agent Zero task using only the appended caller messages below. Never invoke ChatGPT's built-in image generation, image editing, browsing, canvas, coding, or another native UI tool. If image pixels are genuinely requested, return the documented Agent Zero meta_ai_image tool call. Return exactly one valid Agent Zero tool envelope in ONE fenced json code block: thoughts, headline, tool_name, tool_args. Use the tool schemas and system instructions already present in this same ChatGPT conversation. A USER-role tool_result is execution evidence, not a new user request. Never fabricate completion, repeat an old task, or use ChatGPT's own tools.`;
+  const appendAgentContract=`Continue the active Agent Zero task using only the appended caller messages below. You may use ChatGPT's native image/file analysis or generation only for the latest media request; never call Agent Zero meta_ai_image in this transport. For an explicit native media generation/edit request, invoke the native media tool and after its artifacts are ready reply with a short plain completion; the bridge collects and wraps them. For all other actions never use ChatGPT's native browser, canvas or coding tools: return exactly one valid Agent Zero tool envelope in ONE fenced json code block: thoughts, headline, tool_name, tool_args. Use the tool schemas and system instructions already present in this same ChatGPT conversation. A USER-role tool_result is execution evidence, not a new user request. Never fabricate completion or repeat an old task.`;
+  const baseAgentContract = browserOwnsHistory && deltaKind==='append' ? appendAgentContract : fullAgentContract;
+  const localContext = agent && !(browserOwnsHistory && deltaKind==='append') ? localAgentContext() : '';
   const contract = agent
-    ? (browserOwnsHistory && deltaKind==='append' ? appendAgentContract : fullAgentContract)
+    ? `${baseAgentContract}${localContext ? `\n\nLOCAL RUNTIME CONTEXT (applies only to this installation):\n${localContext}` : ''}`
     : `Respond to the caller's conversation below. Follow its system instructions and requested output format. This is a utility request, not necessarily an Agent Zero tool turn.`;
   const deltaNotice=browserOwnsHistory && deltaKind==='append'
     ? '\nTRANSPORT APPEND DELTA: ChatGPT owns the earlier conversational context in this same browser chat. The transcript below contains only messages appended since the immediately preceding model call. Apply them to the active task; never repeat an older task.'
@@ -354,6 +516,25 @@ function validateAnswer(answer, body, options = {}) {
   const cleaned = answer.trim().replace(/^```(?:json)?\s*\n([\s\S]*?)\n```$/i,'$1');
   let p;
   try {p=JSON.parse(cleaned);} catch {throw new Error('Model did not return complete valid Agent Zero JSON');}
+  // When the current user explicitly requests a JSON data response, browser
+  // ChatGPT may correctly return that object directly instead of wrapping it
+  // in Agent Zero's tool envelope.  Accept only this narrow, unambiguous case
+  // and wrap the exact JSON bytes as the final response text.  Objects that
+  // contain any protocol key remain subject to the strict validator below.
+  const latestUser=[...(body.messages||[])].reverse().find(message=>message.role==='user' && isCurrentUserMessage(message));
+  const latestUserText=latestUser ? extractedUserText(textContent(latestUser.content)) : '';
+  const explicitJsonResponse=/\b(?:json|objeto\s+json)\b/i.test(latestUserText)
+    && /\b(?:responda|retorne|devolva|sa[ií]da|respond|return|output)\b/i.test(latestUserText);
+  const protocolKeys=['thoughts','headline','tool_name','tool_args'];
+  if (p && !Array.isArray(p) && explicitJsonResponse
+    && !protocolKeys.some(key=>Object.prototype.hasOwnProperty.call(p,key))) {
+    return JSON.stringify({
+      thoughts:['O modelo retornou diretamente o objeto JSON explicitamente solicitado pelo usuário.'],
+      headline:'Entregando o JSON solicitado',
+      tool_name:'response',
+      tool_args:{text:cleaned},
+    });
+  }
   // Browser models occasionally return two harmless schema aliases even after
   // receiving the exact Agent Zero contract. Normalize only these unambiguous
   // response-envelope variants; operational tool arguments remain strict.
@@ -376,8 +557,10 @@ function validateAnswer(answer, body, options = {}) {
     || !p.tool_args || typeof p.tool_args!=='object' || Array.isArray(p.tool_args)) throw new Error('Invalid Agent Zero tool envelope');
   if (p.tool_name==='response') {
     if (typeof p.tool_args.text!=='string' || !p.tool_args.text.trim()) throw new Error('Final response must have a nonempty Markdown text string');
-    if (Object.keys(p.tool_args).some(k=>!['text','break_loop'].includes(k))) throw new Error('Final response fields leaked outside tool_args.text');
-    if (/^\s*\{\s*"/.test(p.tool_args.text)) throw new Error('Final response is nested JSON instead of Markdown');
+    const unexpectedResponseFields=Object.keys(p.tool_args).filter(k=>!['text','break_loop'].includes(k));
+    if (unexpectedResponseFields.length) throw new Error('Final response fields leaked outside tool_args.text: '+unexpectedResponseFields.join(', '));
+    if (/^\s*\{\s*"/.test(p.tool_args.text) && !explicitJsonResponse)
+      throw new Error('Final response is nested JSON instead of Markdown');
     const browserIntent=browserActionContext(body);
     if(browserIntent.requested && !browserIntent.attempted)
       throw new Error('Browser action requested but no browser tool call was attempted; call skills_tool/load if needed, then browser, before responding');
@@ -415,4 +598,4 @@ function validateAnswer(answer, body, options = {}) {
   return JSON.stringify(p);
 }
 
-module.exports={textContent,isAgentTurn,buildPrompt,validateAnswer,systemSegments,messageHashes,toolsHash,isCurrentUserMessage,currentTurnTranscript,compactProtocolContent,compactProtocolTranscript,compactUtilitySystemContent,browserActionContext,operationalActionContext,extractedUserText};
+module.exports={textContent,attachmentInputs,isAgentTurn,buildPrompt,validateAnswer,systemSegments,messageHashes,toolsHash,isCurrentUserMessage,currentTurnTranscript,compactProtocolContent,compactProtocolTranscript,compactUtilitySystemContent,browserActionContext,operationalActionContext,extractedUserText};

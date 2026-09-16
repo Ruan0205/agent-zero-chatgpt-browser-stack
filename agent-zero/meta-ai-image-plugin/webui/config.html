@@ -1,0 +1,48 @@
+<html>
+<head><title>Meta AI WhatsApp Bridge</title></head>
+<body>
+<div class="meta-pair-page" x-data="metaPairingPanel()" x-init="init()">
+  <header class="meta-pair-hero">
+    <div class="meta-pair-icon"><span class="material-symbols-outlined">auto_awesome</span></div>
+    <div><h2>Meta AI pelo WhatsApp</h2><p>Sessão dedicada para criar e editar imagens sem misturar com o WhatsApp pessoal do Agent Zero.</p></div>
+    <span class="meta-pair-pill" :class="linked ? 'ok' : (loading ? 'wait' : 'off')" x-text="linked ? 'Conectado' : (loading ? 'Verificando' : 'Não conectado')"></span>
+  </header>
+
+  <section class="meta-pair-card">
+    <div class="meta-pair-grid">
+      <div>
+        <label for="meta-phone">Número do WhatsApp</label>
+        <p class="hint">Informe DDI + DDD + número, somente dígitos. Este deve ser o número que conversará com a Meta AI.</p>
+        <input id="meta-phone" x-model="phone" inputmode="numeric" placeholder="5511999999999" :disabled="linked || starting" />
+        <button class="btn btn-primary meta-pair-button" @click="startPairing()" :disabled="linked || starting || !phone">
+          <span class="material-symbols-outlined">link</span>
+          <span x-text="starting ? 'Gerando código…' : (code ? 'Gerar novo código' : 'Conectar WhatsApp')"></span>
+        </button>
+        <button class="btn btn-field meta-refresh" @click="refresh()" :disabled="loading"><span class="material-symbols-outlined">refresh</span> Atualizar estado</button>
+      </div>
+      <div class="meta-code-box" :class="{'has-code': code}">
+        <template x-if="linked"><div class="meta-success"><span class="material-symbols-outlined">verified</span><strong>Conta vinculada</strong><p>A bridge está pronta para receber solicitações de imagem.</p></div></template>
+        <template x-if="!linked && code"><div><div class="eyebrow">Código de pareamento</div><div class="meta-code" x-text="formatCode(code)"></div><p>WhatsApp → Dispositivos conectados → Conectar dispositivo → Conectar com número de telefone.</p><small x-show="expiresAt">O código expira em alguns minutos. Se necessário, gere outro.</small></div></template>
+        <template x-if="!linked && !code"><div class="meta-empty"><span class="material-symbols-outlined">phonelink_setup</span><p>Gere um código quando quiser conectar. O restante do Agent Zero continua funcionando sem esta sessão.</p></div></template>
+      </div>
+    </div>
+    <div class="meta-message" x-show="message" :class="{'is-error': error}" x-text="message"></div>
+  </section>
+  <section class="meta-how"><h3>Como conectar</h3><ol><li>Digite o número com código do país e DDD.</li><li>Clique em <b>Conectar WhatsApp</b>.</li><li>No celular, abra <b>Dispositivos conectados</b> e escolha <b>Conectar com número de telefone</b>.</li><li>Digite o código mostrado acima e aguarde o estado mudar para <b>Conectado</b>.</li></ol></section>
+</div>
+<script type="module">
+import * as API from "/js/api.js";
+window.metaPairingPanel = () => ({
+  phone: "", code: "", linked: false, loading: false, starting: false, message: "", error: false, expiresAt: "", timer: null,
+  async init(){ await this.refresh(); this.timer = setInterval(() => this.refresh(true), 5000); },
+  async refresh(quiet=false){ this.loading = !quiet; try { const r=await API.callJsonApi("/plugins/_meta_ai_image/pairing",{action:"status"}); this.apply(r); if(!quiet && !r.success) this.fail(r.error); } catch(e){ if(!quiet) this.fail(String(e)); } finally { this.loading=false; } },
+  async startPairing(){ this.starting=true; this.message=""; this.error=false; try { const r=await API.callJsonApi("/plugins/_meta_ai_image/pairing",{action:"start",phone:this.phone}); this.apply(r); if(r.success && !r.linked) this.message="Código criado. Digite-o no WhatsApp do celular."; else if(!r.success) this.fail(r.error); } catch(e){ this.fail(String(e)); } finally { this.starting=false; } },
+  apply(r){ if(!r) return; this.linked=!!r.linked; this.code=r.code||""; this.expiresAt=r.expires_at||""; if(r.phone) this.phone=r.phone; if(r.error) this.fail(r.error); else if(this.linked){this.message="Sessão Meta AI conectada e pronta.";this.error=false;} },
+  fail(text){this.error=true;this.message=text||"Não foi possível acessar a bridge.";},
+  formatCode(value){return String(value||"").replace(/(.{4})/g,"$1 ").trim();}
+});
+</script>
+<style>
+.meta-pair-page{max-width:980px;padding:8px 2px 30px}.meta-pair-hero{display:flex;align-items:center;gap:15px;padding:18px;border-radius:18px;background:linear-gradient(135deg,#472c87,#234e72);color:#fff;box-shadow:0 14px 38px #0003}.meta-pair-icon{width:48px;height:48px;border-radius:15px;display:grid;place-items:center;background:#ffffff1f}.meta-pair-icon span{font-size:27px}.meta-pair-hero h2{margin:0 0 3px;font-size:20px}.meta-pair-hero p{margin:0;opacity:.8}.meta-pair-pill{margin-left:auto;padding:7px 11px;border-radius:999px;background:#ffffff1a;font-size:12px;font-weight:750;white-space:nowrap}.meta-pair-pill.ok{background:#1fba741f;color:#b7ffdc;border:1px solid #52dc9d55}.meta-pair-pill.wait{color:#ffe39c}.meta-pair-card,.meta-how{margin-top:14px;padding:19px;border:1px solid color-mix(in srgb,var(--color-border) 82%,#7559ff 18%);border-radius:18px;background:color-mix(in srgb,var(--color-background) 95%,#7559ff 5%)}.meta-pair-grid{display:grid;grid-template-columns:minmax(270px,.9fr) minmax(300px,1.1fr);gap:18px}.meta-pair-card label{display:block;font-weight:750;margin-bottom:5px}.hint{margin:0 0 10px;color:var(--color-text-secondary);font-size:12px;line-height:1.5}.meta-pair-card input{width:100%;box-sizing:border-box}.meta-pair-button,.meta-refresh{margin-top:11px;display:inline-flex;align-items:center;gap:7px}.meta-refresh{margin-left:7px}.meta-code-box{min-height:190px;border:1px dashed color-mix(in srgb,var(--color-border) 70%,#8b6fff 30%);border-radius:15px;display:grid;place-items:center;text-align:center;padding:16px;background:#0000000a}.meta-code-box.has-code{border-style:solid;background:linear-gradient(145deg,#7857ff13,#24b7a50d)}.meta-code{font:800 30px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.09em;margin:13px 0;color:#9c87ff}.eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:10px;color:var(--color-text-secondary)}.meta-empty,.meta-success{color:var(--color-text-secondary)}.meta-empty span,.meta-success span{font-size:35px}.meta-success strong{display:block;color:#54d79a;font-size:16px}.meta-message{margin-top:14px;padding:10px 12px;border-radius:11px;background:#2bbf7b18;color:#54d79a}.meta-message.is-error{background:#ef444418;color:#ff7c8c}.meta-how h3{margin:0 0 8px}.meta-how ol{margin:0;padding-left:20px;line-height:1.65;color:var(--color-text-secondary)}@media(max-width:700px){.meta-pair-grid{grid-template-columns:1fr}.meta-pair-hero{align-items:flex-start;flex-wrap:wrap}.meta-pair-pill{margin-left:0}.meta-refresh{margin-left:0}.meta-pair-button,.meta-refresh{width:100%;justify-content:center}}
+</style>
+</body></html>

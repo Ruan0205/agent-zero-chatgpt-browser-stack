@@ -1,0 +1,51 @@
+FROM agent0ai/agent-zero@sha256:680ab243d358b5fd41847f640c2eac1c59b83b154b22fc38004b8a0631b3d028
+
+USER root
+
+# The upstream runtime image contains a pre-populated /a0 tree, so its startup
+# bootstrap skips copying /git/agent-zero when run_ui.py already exists.  Some
+# release images omit optional-looking plugins that are now imported by core
+# modules (notably _model_config).  Merge only missing upstream files at build
+# time so a clean container recreation cannot boot-loop on a missing plugin.
+RUN mkdir -p /a0 && cp -rn /git/agent-zero/. /a0/
+
+# Persistent runtime dependencies used when Agent Zero validates real user
+# attachments.  Install them in the task execution venv because tool commands
+# run with /opt/venv/bin/python, not the framework's separate venv.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       file \
+       default-jdk-headless \
+       golang-go \
+       librsvg2-bin \
+       mono-mcs \
+       p7zip-full \
+       php-cli \
+       powershell \
+       ruby \
+       rustc \
+       tesseract-ocr \
+       tesseract-ocr-eng \
+       tesseract-ocr-por \
+    && rm -rf /var/lib/apt/lists/* \
+    && /opt/venv/bin/pip install --no-cache-dir \
+       Pillow==11.3.0 \
+       olefile==0.47 \
+       xlrd==2.0.2 \
+       pandas==2.3.2 \
+       pyarrow==25.0.1 \
+       h5py==3.16.0 \
+       scipy==1.18.1 \
+       PyYAML==6.0.2 \
+       pytesseract==0.3.13 \
+       sqlglot==27.14.0 \
+       tinycss2==1.4.0 \
+       tree-sitter==0.25.2 \
+       tree-sitter-batch==0.11.1 \
+    && npm install --global --no-audit --no-fund typescript@5.9.2
+
+# Baileys loads this peer dependency lazily when generating link previews.
+# Pin the compatible major so WhatsApp messages containing URLs do not emit
+# ERR_MODULE_NOT_FOUND at runtime.
+RUN cd /git/agent-zero/plugins/_whatsapp_integration/whatsapp-bridge \
+    && npm install --omit=dev --no-audit --no-fund --save-exact link-preview-js@3.0.5

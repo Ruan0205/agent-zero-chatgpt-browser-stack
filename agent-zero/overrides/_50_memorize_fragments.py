@@ -135,7 +135,9 @@ class MemorizeMemories(Extension):
                 # Convert memory to plain text
                 txt = f"{memory}"
 
-                if set["memory_memorize_consolidation"]:
+                # Do not let secondary LLM consolidation block the foreground
+                # chat. The direct vector-DB branch below still persists memory.
+                if False:
                     
                     try:
                         # Use intelligent consolidation system
@@ -144,7 +146,10 @@ class MemorizeMemories(Extension):
                             self.agent,
                             similarity_threshold=DEFAULT_MEMORY_THRESHOLD,  # More permissive for discovery
                             max_similar_memories=8,
-                            max_llm_context_memories=4
+                            max_llm_context_memories=4,
+                            # Allow queued background consolidation to start
+                            # after a long foreground browser-model turn.
+                            processing_timeout_seconds=180,
                         )
 
                         # Create memory item-specific log for detailed tracking

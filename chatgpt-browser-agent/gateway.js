@@ -6,6 +6,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const bridge = require('./bridge-core');
+const { BrowserPool } = require('./browser-pool');
+const { IncidentAuditor } = require('./incident-auditor');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8000);
 const SCRIPT = process.env.CHATGPT_BROWSER_SCRIPT || path.join(__dirname, 'chatgpt.js');
@@ -20,26 +22,44 @@ const BROWSER_OWNS_HISTORY = String(process.env.BROWSER_OWNS_HISTORY || '').toLo
 const UPLOAD_THRESHOLD_CHARS = Number(process.env.UPLOAD_THRESHOLD_CHARS || (MAX_PROMPT_CHARS + 1));
 const IDLE_RECYCLE_MS = Number(process.env.IDLE_RECYCLE_MS || 60000);
 const REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || 130000);
+const MEDIA_REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_MEDIA_TIMEOUT_MS || 330000);
 const PROVIDER_429_RETRIES = Math.max(0, Number(process.env.PROVIDER_429_RETRIES || 2));
 const PROVIDER_429_RETRY_DELAY_MS = Math.max(0, Number(process.env.PROVIDER_429_RETRY_DELAY_MS || 30000));
+const BROWSER_POOL_MIN = Math.max(2, Number(process.env.BROWSER_POOL_MIN || 2));
+const BROWSER_POOL_IDLE_MS = Math.max(1_000, Number(process.env.BROWSER_POOL_IDLE_MS || 1_800_000));
+const BROWSER_POOL_DIR = process.env.BROWSER_POOL_DIR || path.join(STATE_DIR, 'browser-pool');
+const PROFILE_TEMPLATE = path.join(STATE_DIR, '.chatgpt-poc-profile');
+const INCIDENTS_DIR = process.env.BROWSER_INCIDENTS_DIR || path.join(STATE_DIR,'incidents');
+const A0_CHATS_DIR = process.env.A0_CHATS_DIR || '/a0/usr/chats';
+const POOL_ASSIGNMENT_FILE = path.join(STATE_DIR, '.chatgpt-poc-pool-assignments.json');
+const AGENT_ZERO_NOTICE_URL = process.env.AGENT_ZERO_NOTICE_URL || 'http://agent-zero/api/browser_pool_notice';
+const AGENT_ZERO_NOTICE_TOKEN = process.env.AGENT_ZERO_NOTICE_TOKEN || '';
 const CHATMAP_FILE = path.join(STATE_DIR, '.chatgpt-poc-chatmap.json');
 const UPLOAD_COOLDOWN_FILE = path.join(STATE_DIR, '.upload-cooldown.json');
-let queueTail = Promise.resolve();
-let queued = 0;
-let active = false;
-let recycleTimer = null;
+const ARTIFACT_EXTENSION_PATTERN='(?:tar\\.gz|png|jpe?g|webp|gif|pdf|docx?|xlsx?|pptx|csv|tsv|txt|md|json|xml|ya?ml|html?|svg|py|js|ts|jsx|tsx|java|c|cpp|h|hpp|cs|go|rs|php|rb|sh|ps1|bat|sql|css|toml|ini|cfg|conf|log|ipynb|zip|7z|rar|tar|tgz|gz|bz2|xz|sqlite|db|parquet|feather|npy|npz|h5|hdf5|mat|stl|obj|ply|gltf|glb|dae|dxf|wav|mp3|flac|ogg|opus|aac|mp4|mov|mkv|avi|webm|iso|bin|exe|dll|so|apk|jar)';
+// ChatGPT's web composer accepts an .xls selection but can remain forever in
+// its processing state without producing an assistant turn.  Agent Zero still
+// receives the real multipart upload and exposes its original path to tools;
+// only the unreliable duplicate upload into the browser UI is suppressed.
+const BROWSER_UI_UPLOAD_BLOCKED_EXTENSIONS=new Set(['.xls']);
+
+function loadJsonFile(file,fallback={}) {
+  try { return JSON.parse(fs.readFileSync(file,'utf8')); }
+  catch { return fallback; }
+}
+
+function saveJsonFile(file,value) {
+  const temporary=`${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temporary,JSON.stringify(value,null,2),{mode:0o600});
+  fs.renameSync(temporary,file);
+}
 
 function loadChatMap() {
-  try {
-    const raw = fs.readFileSync(CHATMAP_FILE, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  return loadJsonFile(CHATMAP_FILE,{});
 }
 
 function saveChatMap(map) {
-  fs.writeFileSync(CHATMAP_FILE, JSON.stringify(map, null, 2), {mode: 0o600});
+  saveJsonFile(CHATMAP_FILE,map);
 }
 
 function sleep(ms) {
@@ -47,16 +67,16 @@ function sleep(ms) {
 }
 
 function isProviderMessageLimit(error) {
-  return /Messages limit reached|reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|provider_message_limit/i.test(String(error?.message || error || ''));
+  return /Messages limit reached|reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations|provider_message_limit/i.test(String(error?.message || error || ''));
 }
 
 function requestChatUrlFromError(error) {
   return String(error?.message || '').match(/CHATGPT_REQUEST_URL=(https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+)/)?.[1] || null;
 }
 
-function latestSessionChatUrl() {
+function latestSessionChatUrl(slot) {
   try {
-    const value=fs.readFileSync(path.join(STATE_DIR, '.chatgpt-poc-session'), 'utf8').trim();
+    const value=fs.readFileSync(path.join(slot.stateDir, '.chatgpt-poc-session'), 'utf8').trim();
     return /^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(value) ? value : null;
   } catch {
     return null;
@@ -71,25 +91,144 @@ function conversationKey(req) {
   return 'v2-'+crypto.createHash('sha256').update(JSON.stringify([id,scope])).digest('hex');
 }
 
-function cancelRecycle() {
-  if (recycleTimer) clearTimeout(recycleTimer);
-  recycleTimer = null;
+function runProcess(command,args,env={},timeoutMs=120_000) {
+  return new Promise((resolve,reject)=>{
+    const child=spawn(command,args,{cwd:__dirname,env:{...process.env,...env},stdio:['ignore','pipe','pipe']});
+    let stdout=''; let stderr='';
+    const timer=setTimeout(()=>{
+      child.kill('SIGTERM');
+      reject(new Error(`${path.basename(command)} ${args.join(' ')} timed out`));
+    },timeoutMs);
+    child.stdout.on('data',chunk=>(stdout+=chunk));
+    child.stderr.on('data',chunk=>(stderr+=chunk));
+    child.on('error',error=>{clearTimeout(timer);reject(error);});
+    child.on('close',code=>{
+      clearTimeout(timer);
+      if(code===0) resolve({stdout,stderr});
+      else reject(new Error((stderr||stdout||`${command} exited ${code}`).trim()));
+    });
+  });
 }
 
-function scheduleRecycle() {
-  cancelRecycle();
-  if (IDLE_RECYCLE_MS <= 0) return;
-  recycleTimer = setTimeout(() => {
-    recycleTimer = null;
-    if (active || queued > 0) return;
-    const child = spawn(process.execPath, [SCRIPT, '--stop'], {
-      cwd: __dirname,
-      env: process.env,
-      stdio: 'ignore',
+async function prepareInstanceState(slot) {
+  slot.stateDir=path.join(BROWSER_POOL_DIR,slot.id);
+  const profileDir=path.join(slot.stateDir,'.chatgpt-poc-profile');
+  fs.mkdirSync(BROWSER_POOL_DIR,{recursive:true,mode:0o700});
+  if(!fs.existsSync(profileDir)) {
+    if(!fs.existsSync(PROFILE_TEMPLATE)) {
+      if(String(process.env.BROWSER_ALLOW_EMPTY_PROFILE||'')!=='1')
+        throw new Error(`ChatGPT profile template missing: ${PROFILE_TEMPLATE}`);
+      fs.mkdirSync(PROFILE_TEMPLATE,{recursive:true,mode:0o700});
+      console.warn('[pool] using an empty disposable profile because BROWSER_ALLOW_EMPTY_PROFILE=1');
+    }
+    fs.mkdirSync(slot.stateDir,{recursive:true,mode:0o700});
+    const temporary=path.join(slot.stateDir,`.profile-${crypto.randomUUID()}.tmp`);
+    await runProcess('cp',['-a','--reflink=auto',PROFILE_TEMPLATE,temporary],{},180_000);
+    fs.renameSync(temporary,profileDir);
+    console.log(`[pool] cloned authenticated profile for ${slot.id}`);
+  }
+  for(const name of ['SingletonLock','SingletonCookie','SingletonSocket']) {
+    try { fs.rmSync(path.join(profileDir,name),{force:true}); } catch {}
+  }
+  try { fs.rmSync(path.join(slot.stateDir,'.chatgpt-poc-daemon.json'),{force:true}); } catch {}
+}
+
+async function warmBrowserInstance(slot) {
+  await prepareInstanceState(slot);
+  await runProcess(process.execPath,[SCRIPT,'--warm'],{
+    CHATGPT_BROWSER_STATE_DIR:slot.stateDir,
+    CHATGPT_BROWSER_OUTBOX_DIR:path.join(STATE_DIR,'outbox'),
+  },120_000);
+  console.log(`[pool] ${slot.id} ready`);
+}
+
+async function checkBrowserInstance(slot) {
+  if(!slot.stateDir) slot.stateDir=path.join(BROWSER_POOL_DIR,slot.id);
+  await runProcess(process.execPath,[SCRIPT,'--warm'],{
+    CHATGPT_BROWSER_STATE_DIR:slot.stateDir,
+    CHATGPT_BROWSER_OUTBOX_DIR:path.join(STATE_DIR,'outbox'),
+  },120_000);
+}
+
+async function stopBrowserInstance(slot) {
+  if(!slot.stateDir) slot.stateDir=path.join(BROWSER_POOL_DIR,slot.id);
+  await runProcess(process.execPath,[SCRIPT,'--stop'],{
+    CHATGPT_BROWSER_STATE_DIR:slot.stateDir,
+    CHATGPT_BROWSER_OUTBOX_DIR:path.join(STATE_DIR,'outbox'),
+  },30_000).catch(error=>console.warn(`[pool] stop ${slot.id}: ${error.message}`));
+  console.log(`[pool] ${slot.id} stopped`);
+}
+
+async function notifyScale({slot,metadata,message}) {
+  console.warn(`[pool] ${message}: ${slot.id} context=${metadata?.contextId||'unknown'}`);
+  if(!AGENT_ZERO_NOTICE_TOKEN || !metadata?.contextId) return;
+  try {
+    const response=await fetch(AGENT_ZERO_NOTICE_URL,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-Browser-Pool-Token':AGENT_ZERO_NOTICE_TOKEN},
+      body:JSON.stringify({context_id:metadata.contextId,message}),
+      signal:AbortSignal.timeout(5_000),
     });
-    child.unref();
-  }, IDLE_RECYCLE_MS);
-  recycleTimer.unref();
+    if(!response.ok) throw new Error(`HTTP ${response.status}`);
+  } catch(error) {
+    console.warn(`[pool] unable to publish scale notice to Agent Zero: ${error.message}`);
+  }
+}
+
+const pool=new BrowserPool({
+  minSize:BROWSER_POOL_MIN,
+  idleMs:BROWSER_POOL_IDLE_MS,
+  onWarm:warmBrowserInstance,
+  onStop:stopBrowserInstance,
+  onCheck:checkBrowserInstance,
+  onScale:notifyScale,
+  loadAssignments:()=>loadJsonFile(POOL_ASSIGNMENT_FILE,{}),
+  saveAssignments:value=>saveJsonFile(POOL_ASSIGNMENT_FILE,value),
+});
+
+const auditor=new IncidentAuditor({
+  script:SCRIPT,
+  stateRoot:INCIDENTS_DIR,
+  profileTemplate:PROFILE_TEMPLATE,
+});
+
+function safeChatName(contextId) {
+  if(!/^[\w-]{1,160}$/.test(String(contextId||''))) return String(contextId||'Chat desconhecido');
+  const data=loadJsonFile(path.join(A0_CHATS_DIR,contextId,'chat.json'),{});
+  return String(data.name||data.title||contextId);
+}
+
+function latestQuestion(body) {
+  const message=[...(body?.messages||[])].reverse().find(item=>item.role==='user' && bridge.isCurrentUserMessage(item));
+  return message ? bridge.extractedUserText(bridge.textContent(message.content)) : '';
+}
+
+function isAuditableFinalAnswer(answer) {
+  try {
+    const parsed=JSON.parse(answer);
+    return parsed?.tool_name==='response';
+  } catch {
+    // An unparseable successful answer is itself worth auditing. Explicit
+    // non-final tool envelopes are valid JSON and are excluded above.
+    return true;
+  }
+}
+
+function userVisibleFinalAnswer(answer) {
+  try {
+    const parsed=JSON.parse(answer);
+    if(parsed?.tool_name==='response' && typeof parsed?.tool_args?.text==='string') return parsed.tool_args.text;
+  } catch {}
+  return String(answer||'');
+}
+
+function enqueueAudit({contextId,callScope,question,response='',error='',events=[],httpStatus=null}) {
+  if(!/^main(?:[:]|$)/i.test(callScope) || !contextId || !question) return false;
+  return auditor.enqueue({
+    chatId:contextId,
+    chatName:safeChatName(contextId),
+    question,response,error,events,httpStatus,
+  });
 }
 
 function readJson(req) {
@@ -110,7 +249,145 @@ function readJson(req) {
   });
 }
 
-function runBrowser(prompt, chatUrl, options={}) {
+function resolveAttachmentPaths(refs) {
+  const allowed=['/a0/usr/uploads','/a0/usr/chats','/a0/usr/whatsapp/media','/workspace'];
+  const paths=[];
+  let total=0;
+  for(const ref of refs||[]) {
+    if(typeof ref!=='string' || ref.startsWith('data:')) continue;
+    const abs=path.resolve(ref);
+    if(!allowed.some(root=>abs===root || abs.startsWith(root+path.sep))) throw new Error(`Attachment path is outside allowed storage: ${ref}`);
+    const stat=fs.statSync(abs);
+    if(!stat.isFile()) throw new Error(`Attachment is not a file: ${ref}`);
+    total+=stat.size;
+    if(stat.size>100*1024*1024 || total>250*1024*1024) throw new Error('Attachment size limit exceeded');
+    paths.push(abs);
+  }
+  return [...new Set(paths)].slice(0,20);
+}
+
+function mediaEnvelope(validated, raw, artifacts) {
+  if(!artifacts?.length) return validated;
+  let text='Arquivos prontos.';
+  try {
+    const parsed=JSON.parse(validated);
+    if(parsed?.tool_name==='response' && typeof parsed?.tool_args?.text==='string') text=parsed.tool_args.text;
+  } catch {
+    if(typeof raw==='string' && raw.trim() && raw.length<4000) text=raw.replace(/```(?:json)?/gi,'').trim();
+  }
+  return JSON.stringify({
+    thoughts:['ChatGPT concluiu a mídia solicitada; o bridge coletou os arquivos desta resposta.'],
+    headline:'Entregando arquivos gerados',
+    tool_name:'chatgpt_browser_media',
+    tool_args:{text,files:artifacts.map(a=>({source:a.filename,name:a.originalName,mime:a.mime,size:a.size,sha256:a.sha256}))},
+  });
+}
+
+function requestedArtifactName(text) {
+  const source=String(text||'');
+  const filename=`([A-Za-z0-9._-]+\\.${ARTIFACT_EXTENSION_PATTERN})`;
+
+  // Prefer an explicitly named deliverable. Prompts commonly mention Python
+  // modules after the requested filename (for example `validacao.feather`
+  // followed by `pyarrow.feather`). Choosing the last dotted token caused the
+  // bridge to serialize the library source instead of the requested artifact.
+  const named=source.match(new RegExp(`\\b(?:chamad[oa]|named)\\s+[\"'\\x60]?${filename}\\b`,'i'));
+  if(named) return named[1];
+
+  const output=source.match(new RegExp(`\\b(?:arquivo|file|anexo|attachment|sa[ií]da|output)\\b[^.!?\\n]{0,80}?${filename}\\b`,'i'));
+  if(output) return output[1];
+
+  const matches=[...source.matchAll(new RegExp(`\\b${filename}\\b`,'ig'))];
+  return matches.at(-1)?.[1] || '';
+}
+
+function isNativeMediaRequest(body) {
+  const nonSystem=(body.messages||[]).filter(m=>m.role!=='system');
+  const users=nonSystem.filter(m=>m.role==='user' && bridge.isCurrentUserMessage(m));
+  const latestHumanIndex=nonSystem.reduce((found,message,index)=>message.role==='user'&&bridge.isCurrentUserMessage(message)?index:found,-1);
+  const latestMediaIndex=nonSystem.reduce((found,message,index)=>isExactMediaToolResult(message)?index:found,-1);
+  // A newly appended human request wins over every earlier artifact. When the
+  // media result is newer, this is only Agent Zero's post-tool closing turn.
+  if(latestHumanIndex<0 || latestHumanIndex<latestMediaIndex) return false;
+  const text=users.length ? bridge.extractedUserText(bridge.textContent(users.at(-1).content)) : '';
+  // Feather generation is more reliable through Agent Zero's local Python
+  // toolchain. The connected ChatGPT runtime otherwise tries to download
+  // PyArrow through web search and can remain in visible processing until the
+  // browser timeout. The model still decides and performs the tool call; the
+  // gateway only chooses the transport path.
+  // Feather and ISO need a local tool turn. ISO prompts necessarily mention
+  // the file stored *inside* the image (for example MARKER.TXT); the native
+  // browser path can mistake that inner member for the requested deliverable.
+  // The Agent Zero executor can build and validate the container first, then
+  // the compatibility envelope transports the exact outer file.
+  if(/\b[A-Za-z0-9._-]+\.(?:feather|iso)\b/i.test(text)) return false;
+  // Source-code/project work frequently says "create files" and lists names
+  // such as index.html, compose.yaml or README.md.  Those are instructions for
+  // Agent Zero's VS Code/text_editor tools, not a request for ChatGPT to emit a
+  // downloadable artifact.  Keep native media available when the same request
+  // explicitly asks for a visual asset or an attachment/download delivery.
+  const programmingWorkflow=/\b(?:vs\s*code|vscode|workspace|text_editor|terminal|dockerfile|docker\s+compose|compose\.ya?ml|git|commit|projeto|project|c[oó]digo|codebase|aplica(?:ção|cao)|application)\b/i.test(text);
+  const explicitVisualMedia=/\b(?:gere|gerar|crie|criar|edite|editar|modifique|produza|generate|create|edit|modify|produce)\b[^.!?\n]{0,140}\b(?:imagem|imagens|foto|fotos|ilustra(?:ção|cao|ções|coes)|image|images|picture|pictures)\b/i.test(text);
+  const explicitAttachmentDelivery=/\b(?:anexe|anexo|attachment|baix[aá]vel|downloadable|download|entregue\s+(?:o\s+)?arquivo|retorne\s+(?:o\s+)?arquivo|attach)\b/i.test(text);
+  if(programmingWorkflow && !explicitVisualMedia && !explicitAttachmentDelivery) return false;
+  const media='(?:imagem|imagens|foto|fotos|ilustra(?:ção|cao|ções|coes)|image|images|picture|pictures|pdf|zip|arquivo|file)';
+  const explicitAction=new RegExp(`\\b(?:gere|gerar|crie|criar|edite|editar|modifique|produza|generate|create|edit|modify|produce)\\b[^.!?\\n]{0,140}\\b${media}\\b`,'i');
+  const directMake=new RegExp(`\\b(?:faça|faca)\\b\\s+(?:(?:para\\s+mim)\\s+)?(?:(?:uma?|o|a|duas?|dois|esta?|esse?|essa?)\\s+){0,2}\\b${media}\\b`,'i');
+  // A request can name the output directly ("regenere validacao.feather")
+  // without repeating the generic word "arquivo". Treat only creation-style
+  // verbs as native artifact generation here; deliberately exclude "editar"
+  // so ordinary requests to edit source files remain Agent Zero tool tasks.
+  const explicitFilenameGeneration=new RegExp(`\\b(?:gere|gerar|crie|criar|produza|recrie|regenere|generate|create|produce|recreate|regenerate)\\b[^.!?\\n]{0,180}\\b[\\w.-]+\\.${ARTIFACT_EXTENSION_PATTERN}\\b`,'i');
+  // Route only an explicit media creation/edit instruction. Generic verbs such
+  // as "faça" must directly govern the media object; merely discussing a
+  // reference image/file elsewhere in the sentence is not a native-media task.
+  return text.split(/(?:[.!?]+\s+|\n+)/).some(clause=>explicitAction.test(clause) || directMake.test(clause) || explicitFilenameGeneration.test(clause));
+}
+
+function isExactMediaToolResult(message) {
+  if(message?.role!=='user') return false;
+  const content=bridge.textContent(message.content);
+  // A fresh user retry can be appended to the failed media tool envelope in
+  // the same protocol item. It is a new task, not the closing follow-up for
+  // the old tool call.
+  if(/\}\s*\{\s*["']user_message["']\s*:/s.test(content)) return false;
+  try {
+    const parsed=JSON.parse(content);
+    if(!parsed || typeof parsed!=='object' || !Object.hasOwn(parsed,'tool_result')) return false;
+    const result=parsed.tool_result;
+    const outer=String(parsed._tool_name||parsed.tool_name||'').toLowerCase();
+    const inner=result && typeof result==='object' ? String(result._tool_name||result.tool_name||'').toLowerCase() : '';
+    return outer==='chatgpt_browser_media' || inner==='chatgpt_browser_media';
+  } catch {
+    // Some Agent Zero serializers emit a Python-repr-like outer envelope.
+    // Match only when chatgpt_browser_media is the first top-level tool_name;
+    // this cannot confuse later memory text that merely quotes an old result.
+    return /^\s*\{\s*["']tool_name["']\s*:\s*["']chatgpt_browser_media["']\s*,\s*["']tool_result["']\s*:/i.test(content);
+  }
+}
+
+function protocolDebug(body) {
+  return (body.messages||[]).filter(message=>message.role!=='system').slice(-8).map(message=>{
+    const content=bridge.textContent(message.content);
+    let keys=[]; try { const parsed=JSON.parse(content); keys=parsed&&typeof parsed==='object'?Object.keys(parsed).slice(0,12):[]; } catch {}
+    return {role:message.role,name:message.name||'',current:message.role==='user'&&bridge.isCurrentUserMessage(message),media:isExactMediaToolResult(message),keys,snippet:content.replace(/\s+/g,' ').slice(0,260)};
+  });
+}
+
+function isMediaToolFollowup(body) {
+  const messages=(body.messages||[]).filter(message=>message.role!=='system');
+  const latestHumanIndex=messages.reduce((found,message,index)=>message.role==='user'&&bridge.isCurrentUserMessage(message)?index:found,-1);
+  const latestMediaIndex=messages.reduce((found,message,index)=>isExactMediaToolResult(message)?index:found,-1);
+  return latestMediaIndex>latestHumanIndex;
+}
+
+function nativeMediaPrompt(body) {
+  const users=(body.messages||[]).filter(m=>m.role==='user' && bridge.isCurrentUserMessage(m));
+  const text=users.length ? bridge.extractedUserText(bridge.textContent(users.at(-1).content)) : '';
+  return `Handle the following latest Agent Zero user request directly. You may use ChatGPT's native image/file analysis, image generation, or image editing as appropriate. Never use Meta AI. Any user attachments are uploaded with this prompt. Preserve the user's exact requested content and number of outputs. Save every requested output under /mnt/data using the exact requested filename. Your final response MUST expose every output as a real clickable Markdown sandbox link in the form [Download filename](sandbox:/mnt/data/filename); a plain /mnt/data path, a citation without a download link, source code, or a claim that the file was attached is not sufficient. After those clickable links, add only one short completion sentence.\n\nUSER REQUEST:\n${text}`;
+}
+
+function runBrowser(slot, prompt, chatUrl, options={}) {
   return new Promise((resolve, reject) => {
     const timeoutMs=Math.max(1_000,Number(options.timeoutMs)||REQUEST_TIMEOUT_MS);
     let contextFile=null;
@@ -121,11 +398,12 @@ function runBrowser(prompt, chatUrl, options={}) {
       args.push('--new');
     }
     args.push('--raw-stdin');
+    for(const uploadPath of options.uploadPaths||[]) args.push('--upload',uploadPath);
     if(prompt.length>UPLOAD_THRESHOLD_CHARS) {
       let until=0;
       try { until=JSON.parse(fs.readFileSync(UPLOAD_COOLDOWN_FILE,'utf8')).until || 0; } catch {}
       if (until>Date.now()) return reject(new Error(`UPLOAD_RATE_LIMIT retry_after_seconds=${Math.ceil((until-Date.now())/1000)}; provider upload quota exhausted`));
-      contextFile=path.join(STATE_DIR,`context-${crypto.randomUUID()}.txt`);
+      contextFile=path.join(slot.stateDir,`context-${crypto.randomUUID()}.txt`);
       fs.writeFileSync(contextFile,prompt,{mode:0o600});
       args.push('--upload',contextFile);
     }
@@ -133,8 +411,11 @@ function runBrowser(prompt, chatUrl, options={}) {
       cwd: __dirname,
       env: {
         ...process.env,
+        CHATGPT_BROWSER_STATE_DIR: slot.stateDir,
+        CHATGPT_BROWSER_OUTBOX_DIR: path.join(STATE_DIR, 'outbox'),
         BROWSER_RECOVERY_RELOAD: options.reloadBeforeAttempt ? '1' : '0',
         BROWSER_REQUEST_TIMEOUT_MS: String(timeoutMs),
+        BROWSER_EXPECTED_ARTIFACT: options.expectedArtifact || '',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -163,27 +444,12 @@ function runBrowser(prompt, chatUrl, options={}) {
       }
       const match = stdout.match(/--- RESPONSE ---\s*([\s\S]*?)\s*--- END ---/);
       if (!match) return reject(new Error('Could not parse browser response'));
-      resolve(match[1].trim());
+      const artifactMatch=stdout.match(/--- ARTIFACTS ---\s*([\s\S]*?)\s*--- END ARTIFACTS ---/);
+      let artifacts=[];
+      if(artifactMatch) { try { artifacts=JSON.parse(artifactMatch[1]); } catch {} }
+      resolve({raw:match[1].trim(),artifacts:Array.isArray(artifacts)?artifacts:[]});
     });
   });
-}
-
-function enqueue(work) {
-  cancelRecycle();
-  queued += 1;
-  const run = queueTail.then(async () => {
-    queued -= 1;
-    active = true;
-    try { return await work(); }
-    finally { active = false; scheduleRecycle(); }
-  }, async () => {
-    queued -= 1;
-    active = true;
-    try { return await work(); }
-    finally { active = false; scheduleRecycle(); }
-  });
-  queueTail = run.catch(() => {});
-  return run;
 }
 
 function json(res, status, body) {
@@ -210,30 +476,79 @@ function openAiResponse(answer, prompt) {
 
 function streamResponse(res, answer) {
   const id = `chatcmpl-browser-${Date.now()}`;
-  res.writeHead(200, {'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive'});
+  if(!res.headersSent) res.writeHead(200, {'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive'});
   res.write(`data: ${JSON.stringify({id, object:'chat.completion.chunk', created:Math.floor(Date.now()/1000), model:MODEL_ID, choices:[{index:0, delta:{role:'assistant', content:answer}, finish_reason:null}]})}\n\n`);
   res.write(`data: ${JSON.stringify({id, object:'chat.completion.chunk', created:Math.floor(Date.now()/1000), model:MODEL_ID, choices:[{index:0, delta:{}, finish_reason:'stop'}]})}\n\n`);
   res.end('data: [DONE]\n\n');
+}
+
+function beginStreamHeartbeat(res) {
+  if(!res.headersSent) res.writeHead(200, {
+    'Content-Type':'text/event-stream',
+    'Cache-Control':'no-cache, no-transform',
+    Connection:'keep-alive',
+    'X-Accel-Buffering':'no',
+  });
+  // Comments are valid SSE frames. They contain no model output, but prevent
+  // aiohttp/OpenAI-compatible clients from closing a healthy long operation.
+  res.write(': browser-processing\n\n');
+  const timer=setInterval(()=>{
+    if(res.destroyed||res.writableEnded) return clearInterval(timer);
+    res.write(': browser-processing\n\n');
+  },10_000);
+  timer.unref?.();
+  return timer;
+}
+
+function streamError(res,error) {
+  const payload={error:{message:String(error?.message||error),type:'browser_error',code:'browser_error'}};
+  if(!res.headersSent) res.writeHead(500,{'Content-Type':'application/json'});
+  if(String(res.getHeader('Content-Type')||'').startsWith('text/event-stream')) {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    return res.end('data: [DONE]\n\n');
+  }
+  res.end(JSON.stringify(payload));
 }
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/v1/health')) {
     const profile = fs.existsSync(path.join(STATE_DIR, '.chatgpt-poc-profile'));
     const session = fs.existsSync(path.join(STATE_DIR, '.chatgpt-poc-session'));
-    return json(res, 200, {status:'ok', profile, session, active, queued});
+    const slots=pool.snapshot();
+    const permanentReady=slots.filter(slot=>slot.permanent && slot.state==='ready').length;
+    return json(res, permanentReady>=BROWSER_POOL_MIN ? 200 : 503, {
+      status:permanentReady>=BROWSER_POOL_MIN?'ok':'warming',
+      profile,
+      session,
+      minimum:BROWSER_POOL_MIN,
+      idleTimeoutMs:BROWSER_POOL_IDLE_MS,
+      slots,
+      auditor:auditor.snapshot(),
+    });
   }
   if (req.method === 'GET' && req.url === '/v1/models') {
     return json(res, 200, {object:'list', data:[{id:MODEL_ID, object:'model', created:0, owned_by:'chatgpt-browser-agent'}]});
   }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+    let streamHeartbeat=null;
+    let auditContextId='';
+    let auditCallScope='';
+    let auditQuestion='';
+    const auditEvents=[];
     try {
       const body = await readJson(req);
+      if(body.stream) streamHeartbeat=beginStreamHeartbeat(res);
       let prompt = '';
       
       const chatHash = conversationKey(req);
+      const contextId=String(req.headers['x-a0-conversation-id']||'');
+      const callScope=String(req.headers['x-a0-call-scope']||'');
+      auditContextId=contextId;
+      auditCallScope=callScope;
+      auditQuestion=latestQuestion(body);
       let chatUrl = null;
       
-      const answer = await enqueue(async () => {
+      const answer = await pool.run(chatHash,{contextId,callScope},async slot => {
         if (chatHash) chatUrl = loadChatMap()[chatHash] || null;
         const stateFile=chatHash ? path.join(STATE_DIR,chatHash+'-segments.json') : null;
         let known=new Set();
@@ -247,46 +562,88 @@ const server = http.createServer(async (req, res) => {
             }
           } catch {}
         }
-        prompt=bridge.buildPrompt(body,MAX_PROMPT_CHARS,chatHash ? known : null,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY,callScope:req.headers['x-a0-call-scope']});
-        console.log(`[transport] context=${String(req.headers['x-a0-conversation-id']||'none')} scope=${String(req.headers['x-a0-call-scope']||'none')} mapped=${Boolean(chatUrl)} state=${Boolean(transportState)} prompt_chars=${prompt.length}`);
-        let raw;
+        if(/^main(?:[:]|$)/i.test(callScope)) console.log('[protocol-debug] '+JSON.stringify(protocolDebug(body)));
+        // The media tool has already copied and exposed the files. Agent Zero
+        // performs one post-tool model call solely to obtain a closing answer;
+        // satisfy it locally so the browser never regenerates the same file,
+        // spends another provider message, or races the user's next request.
+        if(/^main(?:[:]|$)/i.test(callScope) && isMediaToolFollowup(body)) {
+          prompt='[local media tool completion]';
+          return JSON.stringify({
+            thoughts:['O resultado real da ferramenta de mídia já foi entregue.'],
+            headline:'Arquivo entregue',
+            tool_name:'response',
+            tool_args:{text:'Arquivo pronto e disponível na conversa.'},
+          });
+        }
+        const turnTimeoutMs=isNativeMediaRequest(body)?MEDIA_REQUEST_TIMEOUT_MS:REQUEST_TIMEOUT_MS;
+        const nativeMedia=isNativeMediaRequest(body) && /^main(?:[:]|$)/i.test(callScope);
+        prompt=nativeMedia ? nativeMediaPrompt(body) : bridge.buildPrompt(body,MAX_PROMPT_CHARS,chatHash ? known : null,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY,callScope});
+        const allAttachmentRefs=/^main(?:[:]|$)/i.test(callScope) ? bridge.attachmentInputs(body,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY}) : [];
+        const alreadyUploaded=new Set(Array.isArray(transportState?.uploadedAttachments)?transportState.uploadedAttachments:[]);
+        const attachmentRefs=allAttachmentRefs.filter(ref=>!alreadyUploaded.has(ref));
+        const uploadPaths=resolveAttachmentPaths(attachmentRefs);
+        const browserUploadPaths=uploadPaths.filter(filePath=>!BROWSER_UI_UPLOAD_BLOCKED_EXTENSIONS.has(path.extname(filePath).toLowerCase()));
+        const latestActualUser=[...(body.messages||[])].reverse().find(message=>message.role==='user' && bridge.isCurrentUserMessage(message));
+        const latestUserText=latestActualUser ? bridge.extractedUserText(bridge.textContent(latestActualUser.content)) : '';
+        // Merely mentioning an attached filename is not a request to create or
+        // return that file.  Artifact recovery/base64 compatibility belongs
+        // only to the explicit native creation/editing route.
+        const expectedArtifact=nativeMedia ? requestedArtifactName(latestUserText) : '';
+        if(uploadPaths.length && !nativeMedia) {
+          prompt += `\n\nATTACHMENT PATH CONTRACT: The same uploaded files are available to Agent Zero tools at these exact original paths: ${JSON.stringify(uploadPaths)}. ChatGPT's UI may rename its private copy under /mnt/data; never use that private /mnt/data name in an Agent Zero tool call. When inspection or project work requires a tool, use the exact original path above. Do not reproduce, return, encode, or attach the input file unless the latest user explicitly asks for an output copy.`;
+        }
+        console.log(`[transport] slot=${slot.id} context=${contextId||'none'} scope=${callScope||'none'} mapped=${Boolean(chatUrl)} state=${Boolean(transportState)} prompt_chars=${prompt.length} attachments=${uploadPaths.length} browser_uploads=${browserUploadPaths.length} attachment_refs=${JSON.stringify(allAttachmentRefs)} latest_user=${JSON.stringify(latestUserText.slice(0,240))}`);
+        let browserResult;
+        // One wall-clock budget covers the initial browser call, one recovery,
+        // and artifact-link exposure. Previously each phase received a fresh
+        // full timeout, so a nominal 330-second media request could run for
+        // more than twice that duration.
+        const requestDeadline=Date.now()+turnTimeoutMs;
+        const remainingBudget=()=>Math.max(1_000,requestDeadline-Date.now());
         const runAttempt=async (reloadBeforeAttempt=false) => {
-          const requestDeadline=Date.now()+REQUEST_TIMEOUT_MS;
-          const remainingBudget=()=>Math.max(1_000,requestDeadline-Date.now());
           try {
-            return await runBrowser(prompt,chatUrl,{reloadBeforeAttempt,timeoutMs:remainingBudget()});
+            const firstSlice=Math.max(1_000,Math.min(remainingBudget(),Math.ceil(turnTimeoutMs/2)));
+            return await runBrowser(slot,prompt,chatUrl,{reloadBeforeAttempt,timeoutMs:firstSlice,uploadPaths:reloadBeforeAttempt?[]:browserUploadPaths,expectedArtifact:nativeMedia?'':expectedArtifact});
           } catch(error) {
-            const responseNeverStarted=/Timed out waiting for ChatGPT to start responding/i.test(error.message);
-            if(!responseNeverStarted || remainingBudget()<=5_000) throw error;
+            // chatgpt.js reports three equivalent UI stalls depending on how
+            // far the assistant turn progressed.  Treat all of them as the
+            // same recoverable condition so the bounded second attempt stays
+            // in the same ChatGPT conversation instead of surfacing a 502 to
+            // LiteLLM (which would replay the whole request in a new chat).
+            const recoverableStall=/Timed out waiting for (?:ChatGPT to (?:start responding|publish its assistant turn after visible processing)|final response; partial text not returned)/i.test(error.message);
+            if(!recoverableStall || remainingBudget()<=5_000) throw error;
 
             // Exactly one startup recovery inside this attempt. Provider 429
             // retries are handled by the outer loop with their own fresh budget.
-            if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl();
+            if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl(slot);
             if(!chatUrl) throw new Error('Recovery refused: the current request chat URL was not returned by the browser');
-            console.warn(`[recovery] No response began within 60s; reloading once and retrying with ${remainingBudget()}ms left`);
-            return runBrowser(prompt,chatUrl,{
+            console.warn(`[recovery] Browser response stalled; reloading the same chat once with ${remainingBudget()}ms left`);
+            auditEvents.push('A resposta visível travou; o mesmo chat foi recarregado uma vez para recuperação.');
+            return runBrowser(slot,prompt,chatUrl,{
               reloadBeforeAttempt:true,
               timeoutMs:remainingBudget(),
+              uploadPaths:[],
+              expectedArtifact:nativeMedia?'':expectedArtifact,
             });
           }
         };
         for(let rateAttempt=0;;rateAttempt++) {
           try {
-            raw=await runAttempt(rateAttempt>0);
+            browserResult=await runAttempt(rateAttempt>0);
             break;
           } catch(error) {
             if(!isProviderMessageLimit(error) || rateAttempt>=PROVIDER_429_RETRIES) throw error;
-            if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl();
+            if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl(slot);
             if(!chatUrl) throw new Error('Provider 429 retry refused: the current ChatGPT chat URL is unknown');
             console.warn(`[provider-429] attempt ${rateAttempt+1}/${PROVIDER_429_RETRIES} failed; waiting ${PROVIDER_429_RETRY_DELAY_MS}ms, then reloading the same chat and retrying`);
+            auditEvents.push(`O provedor retornou limite de mensagens; retentativa ${rateAttempt+1}/${PROVIDER_429_RETRIES} após ${PROVIDER_429_RETRY_DELAY_MS} ms.`);
             await sleep(PROVIDER_429_RETRY_DELAY_MS);
           }
         }
-        const requestDeadline=Date.now()+REQUEST_TIMEOUT_MS;
-        const remainingBudget=()=>Math.max(1_000,requestDeadline-Date.now());
         if (!chatUrl && chatHash) {
           try {
-            const sessionFile = path.join(STATE_DIR, '.chatgpt-poc-session');
+            const sessionFile = path.join(slot.stateDir, '.chatgpt-poc-session');
             if (fs.existsSync(sessionFile)) {
               const newChatUrl = fs.readFileSync(sessionFile, 'utf8').trim();
               if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(newChatUrl)) {
@@ -309,38 +666,87 @@ const server = http.createServer(async (req, res) => {
               ids:[...known],
               messageHashes:bridge.messageHashes(body),
               toolsHash:bridge.toolsHash(body),
+              uploadedAttachments:[...new Set([...alreadyUploaded,...allAttachmentRefs])],
             }),{mode:0o600});
           }
         };
-        try { const result=bridge.validateAnswer(raw, body,{callScope:req.headers['x-a0-call-scope']}); remember(); return result; }
+        let raw=browserResult.raw;
+        let artifacts=browserResult.artifacts||[];
+        if(nativeMedia && !artifacts.length) {
+          const createdPath=(raw.match(/\/mnt\/data\/[^\s)\]>'"]+/)||[])[0]||'';
+          const exposePrompt=createdPath
+            ? `The file already exists at ${createdPath}. Do not recreate or modify it. Return a real clickable Markdown download link exactly in this form: [Download ${createdPath.split('/').pop()}](sandbox:${createdPath}). Then add one short completion sentence.`
+            : 'The requested file was not exposed as a downloadable artifact. Do not repeat unrelated work. Locate the file you just created under /mnt/data and return it as a real clickable Markdown sandbox:/mnt/data link. If it is missing, recreate it once with the exact requested filename and then expose that clickable link.';
+          console.warn(`[media-recovery] No downloadable artifact in completed response; requesting one link exposure${createdPath?` for ${createdPath}`:''}`);
+          auditEvents.push('A resposta de mídia terminou sem anexo baixável; foi feita uma única recuperação do link.');
+          if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its total media budget before artifact-link recovery');
+          const recovered=await runBrowser(slot,exposePrompt,chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:''});
+          if(recovered.artifacts?.length) {
+            raw=recovered.raw;
+            artifacts=recovered.artifacts;
+          } else throw new Error('ChatGPT concluiu a solicitação de mídia, mas nenhum arquivo baixável foi encontrado após a recuperação única');
+        }
+        try { const result=bridge.validateAnswer(raw, body,{callScope}); remember(); return mediaEnvelope(result,raw,artifacts); }
         catch (error) {
+          if(artifacts.length && /^main(?:[:]|$)/i.test(callScope)) { remember(); return mediaEnvelope('',raw,artifacts); }
           console.warn('Response format retry:', error.message);
+          auditEvents.push(`A primeira resposta teve formato inválido e foi refeita uma vez: ${error.message}`);
           if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its 130-second budget before format recovery');
-          const retry = await runBrowser(prompt+'\n\nYour previous attempt had this format error: '+error.message+'. Generate the next response again as valid JSON, preserving the latest user task.', chatUrl,{timeoutMs:remainingBudget()});
-          const result=bridge.validateAnswer(retry, body,{callScope:req.headers['x-a0-call-scope']}); remember(); return result;
+          const retry = await runBrowser(slot,prompt+'\n\nYour previous attempt had this format error: '+error.message+'. Generate the next response again as valid JSON, preserving the latest user task.', chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:nativeMedia?'':expectedArtifact});
+          const result=bridge.validateAnswer(retry.raw, body,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
         }
       });
+      if(isAuditableFinalAnswer(answer)) enqueueAudit({
+        contextId:auditContextId,
+        callScope:auditCallScope,
+        question:auditQuestion,
+        response:userVisibleFinalAnswer(answer),
+        events:auditEvents,
+        httpStatus:200,
+      });
+      if(streamHeartbeat) { clearInterval(streamHeartbeat); streamHeartbeat=null; }
       if (body.stream) return streamResponse(res, answer);
       return json(res, 200, openAiResponse(answer, prompt));
     } catch (error) {
+      if(streamHeartbeat) { clearInterval(streamHeartbeat); streamHeartbeat=null; }
+      if(res.headersSent) {
+        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:auditEvents,httpStatus:500});
+        return streamError(res,error);
+      }
       const rate=error.message.match(/UPLOAD_RATE_LIMIT retry_after_seconds=(\d+)/);
       if(rate) {
+        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A requisição terminou em HTTP 429.'],httpStatus:429});
         res.setHeader('Retry-After',rate[1]);
         return json(res,429,{error:{message:error.message,type:'rate_limit_error'}});
       }
-      if (/Messages limit reached|reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)/i.test(error.message)) {
+      if (/Messages limit reached|reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations/i.test(error.message)) {
+        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A conta ChatGPT atingiu o limite do provedor após as retentativas configuradas.'],httpStatus:429});
         res.setHeader('Retry-After','14400');
         return json(res,429,{error:{message:'A conta ChatGPT conectada atingiu o limite de mensagens do provedor. Nenhuma mensagem foi enviada; tente novamente após o horário de reset exibido no navegador.',type:'rate_limit_error',code:'provider_message_limit'}});
       }
       if (/message you submitted was too long|Context exceeds browser bridge limit/i.test(error.message))
+      {
+        enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A requisição excedeu o contexto aceito pelo bridge.'],httpStatus:400});
         return json(res,400,{error:{message:'Context too large. Compact this conversation before retrying. No tool was executed by this request.',type:'invalid_request_error',code:'context_length_exceeded'}});
+      }
+      enqueueAudit({contextId:auditContextId,callScope:auditCallScope,question:auditQuestion,error:error.message,events:[...auditEvents,'A requisição terminou em erro do browser bridge.'],httpStatus:502});
       return json(res, 502, {error:{message:error.message, type:'browser_agent_error'}});
     }
   }
   return json(res, 404, {error:{message:'not found', type:'not_found'}});
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`OpenAI-compatible browser gateway listening on ${PORT}`));
+async function startGateway() {
+  await pool.start();
+  server.listen(PORT,'0.0.0.0',()=>{
+    console.log(`OpenAI-compatible browser gateway listening on ${PORT} with ${BROWSER_POOL_MIN} permanent browser instances`);
+  });
+}
+
+startGateway().catch(error=>{
+  console.error(`[pool] gateway startup failed: ${error.stack||error.message}`);
+  process.exit(1);
+});
 
 // Finish accepted requests (including background memory) before Docker stops
 // the browser. Abrupt termination used to disconnect live Utility requests.
@@ -348,7 +754,9 @@ let shuttingDown=false;
 process.on('SIGTERM', () => {
   if (shuttingDown) return;
   shuttingDown=true;
-  cancelRecycle();
   console.log('Graceful shutdown: draining accepted requests');
-  server.close(() => process.exit(0));
+  server.close(async()=>{
+    await Promise.allSettled([pool.shutdown(),auditor.shutdown()]);
+    process.exit(0);
+  });
 });

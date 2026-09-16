@@ -13,6 +13,7 @@ if [ ! -f .env ]; then
   root_password=$(openssl rand -hex 16)
   rfc_password=$(openssl rand -hex 16)
   vscode_token=$(openssl rand -hex 32)
+  browser_notice_token=$(openssl rand -hex 32)
   journal_token=$(openssl rand -hex 32)
   vnc_password=$(openssl rand -hex 4)
 
@@ -21,6 +22,7 @@ if [ ! -f .env ]; then
     -e "s/troque-esta-senha-root$/$root_password/" \
     -e "s/troque-esta-senha-rfc$/$rfc_password/" \
     -e "s/gere-um-token-aleatorio-longo$/$vscode_token/" \
+    -e "s/gere-um-token-de-aviso-aleatorio-longo$/$browser_notice_token/" \
     -e "s/gere-outro-token-aleatorio-longo$/$journal_token/" \
     -e "s/Vnc12345$/$vnc_password/" \
     .env

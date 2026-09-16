@@ -1,0 +1,11 @@
+<div
+  class="right-canvas-surface-panel browser-incidents-canvas-surface"
+  data-surface-id="browser-incidents"
+  :class="{
+    'is-active': $store.rightCanvas?.isSurfaceVisible('browser-incidents'),
+    'is-mounted': $store.rightCanvas?.isSurfaceRendered('browser-incidents')
+  }"
+  :aria-hidden="(!$store.rightCanvas?.isSurfaceVisible('browser-incidents')).toString()"
+>
+  <x-component path="/plugins/_browser_incidents/webui/main.html" mode="canvas"></x-component>
+</div>

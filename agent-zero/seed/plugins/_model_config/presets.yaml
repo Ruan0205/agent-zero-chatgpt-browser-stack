@@ -70,8 +70,8 @@
     api_base: http://chatgpt-browser-agent:8000/v1
     kwargs:
       temperature: 0.4
-    ctx_length: 49152
-    ctx_history: 0.5
+    ctx_length: 65536
+    ctx_history: 0.85
     vision: true
     max_embeds: 10
     rl_requests: 0

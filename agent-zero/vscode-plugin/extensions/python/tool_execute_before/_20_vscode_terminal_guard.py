@@ -30,6 +30,12 @@ class VscodeTerminalGuard(Extension):
 
         context_id = str(self.agent.context.id)
         command = str(tool_args.get("code") or "")
+        # Uploaded user files live in Agent Zero's persistent /a0/usr volume,
+        # not in the isolated VS Code sidecar.  Keep attachment inspection in
+        # the Agent Zero container even when this chat already has a workspace;
+        # project commands remain routed to VS Code as before.
+        if "/a0/usr/uploads/" in command or "/a0/usr/browser-media/" in command:
+            return
         timeout = max(1, min(int(tool_args.get("timeout") or 120), 600))
         payload = base64.b64encode(json.dumps({
             "context_id": context_id,

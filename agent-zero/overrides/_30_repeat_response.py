@@ -91,6 +91,10 @@ class RepeatResponse(Extension):
 
         llm_result = result_data.get("llm_result")
         response = getattr(llm_result, "response", "")
+        # v2.12 can represent a completed native tool call outside the textual
+        # response. Normalize it before applying the deterministic loop guard.
+        if getattr(llm_result, "function_calls", None):
+            response = llm_result.function_calls_text()
         if not isinstance(response, str):
             return
 
