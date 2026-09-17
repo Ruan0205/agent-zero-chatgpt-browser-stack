@@ -30,6 +30,8 @@ const http                = require('http');
 const crypto              = require('crypto');
 const readline            = require('readline');
 const { execSync, spawn } = require('child_process');
+const { activeProviderRejection } = require('./provider-rejection');
+const { canCollectCompletedTurn } = require('./completion-state');
 
 const puppeteer = addExtra(puppeteerCore);
 puppeteer.use(StealthPlugin());
@@ -48,11 +50,11 @@ const DAEMON_FILE      = path.join(STATE_DIR, '.chatgpt-poc-daemon.json');
 const DAEMON_LOG       = path.join(STATE_DIR, '.chatgpt-poc-daemon.log');
 const MANUAL_LOGIN_FILE = path.join(STATE_DIR, '.manual-login-active');
 const CHATGPT_URL      = 'https://chatgpt.com';
-// One Agent Zero turn gets a bounded 130-second browser budget. ChatGPT must
-// begin answering within 60 seconds; otherwise the daemon reloads once and
-// makes one final attempt inside the same overall budget.
-const REQUEST_TIMEOUT        = 130_000;
-const MAX_REQUEST_TIMEOUT    = 360_000;
+// The provider may continue a legitimate generation well beyond 130 seconds.
+// The gateway/client have a 540/600-second safety ceiling, but a timeout is
+// never permission to resend a user turn that ChatGPT already acknowledged.
+const REQUEST_TIMEOUT        = 540_000;
+const MAX_REQUEST_TIMEOUT    = 540_000;
 const RESPONSE_START_TIMEOUT = 130_000;
 
 // ─── System prompt ────────────────────────────────────────────────────────────
@@ -802,40 +804,7 @@ async function enableTemporaryChat(page, log) {
 }
 
 async function readProviderRejection(page) {
-  return page.evaluate(() => {
-    const selectors='[role="alert"], [aria-live="assertive"], [data-testid*="toast"], [class*="toast"]';
-    const visible=[...document.querySelectorAll(selectors)]
-      .filter(el=>el.getBoundingClientRect().height>0)
-      .map(el=>(el.innerText||el.textContent||'').trim()).filter(Boolean).join('\n');
-    // Do not scan the entire conversation: a historical rejected turn remains
-    // in the DOM and would poison every later request forever.
-    // Capacity banners are sometimes ordinary fixed-position text instead of
-    // ARIA alerts. Read only the active composer neighbourhood as a bounded
-    // fallback; never scan historical conversation turns.
-    const composer=document.querySelector('#prompt-textarea');
-    const composerRegion=composer?.closest('form') || composer?.parentElement?.parentElement;
-    const nearby=(composerRegion?.innerText||'').trim();
-    // Exact quota wording is safe to read globally: unlike generic request
-    // errors it cannot be confused with normal historic assistant prose.
-    const pageCapacity=(document.body?.innerText||'').match(/(?:Messages limit reached|You(?:'|’)ve reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations)[^\n]*/i)?.[0]||'';
-    const text=[visible,nearby,pageCapacity].filter(Boolean).join('\n');
-    const patterns=[
-      /The message you submitted was too long[^\n]*/i,
-      /Please edit it and resubmit[^\n]*/i,
-      /A mensagem[^\n]{0,120}(?:muito longa|grande demais)[^\n]*/i,
-      /Your request is too large[^\n]*/i,
-      /Messages limit reached[^\n]*/i,
-      /You(?:'|’)ve reached your (?:message|usage) limit[^\n]*/i,
-      /Limite de mensagens (?:atingido|alcançado)[^\n]*/i,
-      /Too many requests[^\n]*/i,
-      /temporarily limited access to your conversations[^\n]*/i,
-    ];
-    for(const pattern of patterns) {
-      const match=text.match(pattern);
-      if(match) return match[0].trim().slice(0,500);
-    }
-    return '';
-  }).catch(()=> '');
+  return page.evaluate(activeProviderRejection).catch(()=> '');
 }
 
 async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, submittedUserTurnId=null) {
@@ -922,8 +891,9 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
     throw err;
   }
 
-  // A pause in token output is NOT completion. Require generation controls
-  // to be idle, a final response action, and stable full text, with a deadline.
+  // A pause in token output is NOT completion. The response must belong to
+  // this submitted turn and have a final action or an idle generation control.
+  // The deadline is a safety failure, never a signal to resubmit the prompt.
   let lastText = '';
   let stableCount = 0;
   let stableEnvelope = '';
@@ -974,52 +944,40 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
     const downloadText=/\bDownload\s+[^\n]+\.[a-z0-9.]{1,12}\b/i.test(state.text||'') ? state.text : '';
     if(downloadText && downloadText===stableDownloadText) {
       if(!downloadTextSince) downloadTextSince=Date.now();
-      if(Date.now()-downloadTextSince>=5000) {
-        const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
-        if(stop) await stop.click();
+      if(canCollectCompletedTurn(state,Date.now()-downloadTextSince,2000)) {
         if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(page.url()))
           fs.writeFileSync(SESSION_FILE, page.url(), 'utf8');
-        log('Recovered stable downloadable-file response after 5 seconds; collecting artifacts');
+        log('Completed downloadable-file response; collecting artifacts');
         return state.text;
       }
     } else { stableDownloadText=downloadText; downloadTextSince=downloadText?Date.now():0; }
     if(state.media && state.media===stableMedia) {
       if(!mediaSince) mediaSince=Date.now();
-      if(Date.now()-mediaSince>=5000) {
-        const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
-        if(stop) await stop.click();
-        log('Recovered stable native media after 5 seconds; collecting artifacts');
+      if(canCollectCompletedTurn(state,Date.now()-mediaSince,2000)) {
+        log('Completed native media response; collecting artifacts');
         return state.text || 'Mídia pronta.';
       }
     } else { stableMedia=state.media||''; mediaSince=state.media?Date.now():0; }
     if(state.envelope && state.envelope===stableEnvelope) {
-      if(Date.now()-envelopeSince>=5000) {
-        // A single complete machine envelope is the entire A0 response.
-        // Quiesce this generation before releasing the serialized browser.
-        const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
-        if(stop) await stop.click();
-        // Some UI versions leave the stop control mounted after cancellation.
-        // Verify the atomic payload, then detach this page from the old stream.
+      if(canCollectCompletedTurn(state,Date.now()-envelopeSince,2000)) {
+        // A complete machine envelope is the entire A0 response, but do not
+        // cancel a still-active model merely because its text paused.
         const current=await extractLastAssistantMessage(page);
         if(current!==state.envelope) throw new Error('Response changed while recovering stalled generation');
         if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(page.url()))
           fs.writeFileSync(SESSION_FILE, page.url(), 'utf8');
-        log('Recovered complete JSON envelope after 5 seconds unchanged; mapped chat kept visible');
+        log('Completed JSON envelope; mapped chat kept visible');
         return state.envelope;
       }
     } else {stableEnvelope=state.envelope;envelopeSince=Date.now();}
-    // ChatGPT can leave "Stop answering" mounted after a complete short
-    // plain-text turn, without ever adding the usual Copy action. Wait for a
-    // longer quiet interval than structured JSON and verify after stopping.
+    // A complete plain response may lack a Copy action. Require an idle
+    // generation control; do not click Stop just because the text paused.
     if(!state.envelope && state.text?.trim() && !/^(?:analyzing|thinking|working|generating|processing)(?:\.{0,3}|\s+\d+%)?$/i.test(state.text.trim())) {
       if(state.text===stablePlainText) {
-        if(Date.now()-plainTextSince>=12000) {
-          const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
-          if(stop) await stop.click().catch(()=>{});
-          await new Promise(r=>setTimeout(r,500));
+        if(canCollectCompletedTurn(state,Date.now()-plainTextSince,3000)) {
           const current=await extractLastAssistantMessage(page);
-          if(current!==state.text.trim()) throw new Error('Plain response changed during stalled-generation recovery');
-          log('Recovered stable plain response after 12 seconds; mapped chat kept visible');
+          if(current!==state.text.trim()) throw new Error('Plain response changed while collecting final answer');
+          log('Completed plain response; mapped chat kept visible');
           return current;
         }
       } else { stablePlainText=state.text; plainTextSince=Date.now(); }
@@ -1143,6 +1101,7 @@ async function startDaemonProcess() {
         controls: [...document.querySelectorAll('button')].map(b=>b.getAttribute('aria-label')||b.getAttribute('data-testid')||b.innerText).filter(Boolean).slice(-50),
         downloadHtml: [...document.querySelectorAll('button')].filter(b=>(b.getAttribute('aria-label')||b.innerText||'').includes('Download file')).slice(-10).map(b=>b.outerHTML.slice(0,2000)),
       }));
+      browserState.activeProviderRejection=await readProviderRejection(page);
       return send(200, { ok: true, browser: browserState });
     }
 

@@ -17,6 +17,7 @@ O repositório contém as customizações funcionais da instalação de origem, 
 - Envio enxuto ao navegador, reutilizando o contexto mantido pelo próprio ChatGPT.
 - Três Chromes simultâneos, cada um em seu próprio display/noVNC; a quarta chamada aguarda numa fila, sem criar outro navegador.
 - Após "too many requests", todas as novas submissões desse gateway aguardam pelo menos 30 segundos; há até duas retentativas no mesmo chat.
+- Avisos de cota são lidos apenas de notificações ativas da interface, nunca do texto do usuário ou do histórico. Um turno já aceito não é reenviado por simples demora; o bridge acompanha o estado do turno e retorna erro explícito se atingir o prazo de segurança de nove minutos.
 - Chromium visível por noVNC e painel integrado no Agent Zero.
 - VS Code/code-server por chat, executor autenticado e acesso ao Docker do host.
 - Proteções contra repetição de respostas e contra memorização que trava o fluxo.

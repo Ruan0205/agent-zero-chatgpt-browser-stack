@@ -10,6 +10,7 @@ const { BrowserPool } = require('./browser-pool');
 const { IncidentAuditor } = require('./incident-auditor');
 const { finalResponseText } = require('./audit-eligibility');
 const { ProviderCooldown } = require('./provider-cooldown');
+const { isProviderMessageLimit, retryProviderRejection } = require('./retry-policy');
 const { compactUtilityBody } = require('./utility-compactor');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8000);
@@ -24,8 +25,8 @@ const BROWSER_OWNS_HISTORY = String(process.env.BROWSER_OWNS_HISTORY || '').toLo
 // the complete prompt in the composer by default; uploads remain opt-in only.
 const UPLOAD_THRESHOLD_CHARS = Number(process.env.UPLOAD_THRESHOLD_CHARS || (MAX_PROMPT_CHARS + 1));
 const IDLE_RECYCLE_MS = Number(process.env.IDLE_RECYCLE_MS || 60000);
-const REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || 130000);
-const MEDIA_REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_MEDIA_TIMEOUT_MS || 330000);
+const REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || 540000);
+const MEDIA_REQUEST_TIMEOUT_MS = Number(process.env.BROWSER_MEDIA_TIMEOUT_MS || 540000);
 const PROVIDER_429_RETRIES = Math.max(0, Number(process.env.PROVIDER_429_RETRIES || 2));
 const PROVIDER_429_RETRY_DELAY_MS = Math.max(30000, Number(process.env.PROVIDER_429_RETRY_DELAY_MS || 30000));
 const BROWSER_POOL_MIN = Math.max(1, Number(process.env.BROWSER_POOL_MIN || 2));
@@ -69,10 +70,6 @@ function loadChatMap() {
 
 function saveChatMap(map) {
   saveJsonFile(CHATMAP_FILE,map);
-}
-
-function isProviderMessageLimit(error) {
-  return /Messages limit reached|reached your (?:message|usage) limit|Limite de mensagens (?:atingido|alcançado)|Too many requests|temporarily limited access to your conversations|provider_message_limit/i.test(String(error?.message || error || ''));
 }
 
 function requestChatUrlFromError(error) {
@@ -387,8 +384,13 @@ function nativeMediaPrompt(body) {
 
 async function runBrowser(slot, prompt, chatUrl, options={}) {
   await providerCooldown.wait();
+  if(options.deadline && Date.now()>=options.deadline-1_000)
+    throw new Error('Browser request safety deadline reached; submitted turn was not resent');
   return new Promise((resolve, reject) => {
-    const timeoutMs=Math.max(1_000,Number(options.timeoutMs)||REQUEST_TIMEOUT_MS);
+    const timeoutMs=Math.max(1_000,Math.min(
+      Number(options.timeoutMs)||REQUEST_TIMEOUT_MS,
+      options.deadline ? options.deadline-Date.now() : Number.POSITIVE_INFINITY,
+    ));
     let contextFile=null;
     const args=[SCRIPT];
     if (chatUrl) {
@@ -626,7 +628,7 @@ const server = http.createServer(async (req, res) => {
                 });
                 break;
               } catch(error) {
-                if(!isProviderMessageLimit(error) || attempt>=PROVIDER_429_RETRIES) throw error;
+                if(!retryProviderRejection(error,attempt,PROVIDER_429_RETRIES)) throw error;
                 if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl(slot);
                 if(!chatUrl) throw new Error('Utility 429 recovery refused: the dedicated chat URL is unknown');
                 console.warn(`[utility-compaction] provider 429; retry ${attempt+1}/${PROVIDER_429_RETRIES} after ${PROVIDER_429_RETRY_DELAY_MS}ms`);
@@ -672,39 +674,22 @@ const server = http.createServer(async (req, res) => {
         // more than twice that duration.
         const requestDeadline=Date.now()+turnTimeoutMs;
         const remainingBudget=()=>Math.max(1_000,requestDeadline-Date.now());
-        const runAttempt=async (reloadBeforeAttempt=false) => {
-          try {
-            const firstSlice=Math.max(1_000,Math.min(remainingBudget(),Math.ceil(turnTimeoutMs/2)));
-            return await runBrowser(slot,prompt,chatUrl,{reloadBeforeAttempt,timeoutMs:firstSlice,uploadPaths:reloadBeforeAttempt?[]:browserUploadPaths,expectedArtifact:nativeMedia?'':expectedArtifact});
-          } catch(error) {
-            // chatgpt.js reports three equivalent UI stalls depending on how
-            // far the assistant turn progressed.  Treat all of them as the
-            // same recoverable condition so the bounded second attempt stays
-            // in the same ChatGPT conversation instead of surfacing a 502 to
-            // LiteLLM (which would replay the whole request in a new chat).
-            const recoverableStall=/Timed out waiting for (?:ChatGPT to (?:start responding|publish its assistant turn after visible processing)|final response; partial text not returned)/i.test(error.message);
-            if(!recoverableStall || remainingBudget()<=5_000) throw error;
-
-            // Exactly one startup recovery inside this attempt. Provider 429
-            // retries are handled by the outer loop with their own fresh budget.
-            if(!chatUrl) chatUrl=requestChatUrlFromError(error);
-            if(!chatUrl) throw new Error('Recovery refused: the current request chat URL was not returned by the browser');
-            console.warn(`[recovery] Browser response stalled; reloading the same chat once with ${remainingBudget()}ms left`);
-            auditEvents.push('A resposta visível travou; o mesmo chat foi recarregado uma vez para recuperação.');
-            return runBrowser(slot,prompt,chatUrl,{
-              reloadBeforeAttempt:true,
-              timeoutMs:remainingBudget(),
-              uploadPaths:[],
-              expectedArtifact:nativeMedia?'':expectedArtifact,
-            });
-          }
-        };
+        // One submission per attempt. A timeout is an inconclusive result,
+        // not evidence that the provider rejected the user turn. Retrying a
+        // timed-out but still-running turn used to duplicate user messages.
+        const runAttempt=(reloadBeforeAttempt=false) => runBrowser(slot,prompt,chatUrl,{
+          reloadBeforeAttempt,
+          timeoutMs:remainingBudget(),
+          deadline:requestDeadline,
+          uploadPaths:reloadBeforeAttempt?[]:browserUploadPaths,
+          expectedArtifact:nativeMedia?'':expectedArtifact,
+        });
         for(let rateAttempt=0;;rateAttempt++) {
           try {
             browserResult=await runAttempt(rateAttempt>0);
             break;
           } catch(error) {
-            if(!isProviderMessageLimit(error) || rateAttempt>=PROVIDER_429_RETRIES) throw error;
+            if(!retryProviderRejection(error,rateAttempt,PROVIDER_429_RETRIES)) throw error;
             if(!chatUrl) chatUrl=requestChatUrlFromError(error);
             if(!chatUrl) throw new Error('Provider 429 retry refused: the current ChatGPT chat URL is unknown');
             console.warn(`[provider-429] attempt ${rateAttempt+1}/${PROVIDER_429_RETRIES} failed; waiting ${PROVIDER_429_RETRY_DELAY_MS}ms, then reloading the same chat and retrying`);
@@ -758,7 +743,7 @@ const server = http.createServer(async (req, res) => {
           if(artifacts.length && /^main(?:[:]|$)/i.test(callScope)) { remember(); return mediaEnvelope('',raw,artifacts); }
           console.warn('Response format retry:', error.message);
           auditEvents.push(`A primeira resposta teve formato inválido e foi refeita uma vez: ${error.message}`);
-          if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its 130-second budget before format recovery');
+          if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its safety budget before format recovery');
           const retry = await runBrowser(slot,prompt+'\n\nYour previous attempt had this format error: '+error.message+'. Generate the next response again as valid JSON, preserving the latest user task.', chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:nativeMedia?'':expectedArtifact});
           const result=bridge.validateAnswer(retry.raw, requestBody,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
         }

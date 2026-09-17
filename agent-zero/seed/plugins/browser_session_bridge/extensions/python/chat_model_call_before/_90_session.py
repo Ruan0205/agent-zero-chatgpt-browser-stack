@@ -21,9 +21,9 @@ class BrowserSession(Extension):
                 ctx.set_data('chat_model_override', frozen)
                 ctx.set_data('browser_model_lock', {'preset_name':preset,'model_name':str(model.model_name)})
                 save_tmp_chat(ctx)
-            # The gateway may spend 130s on a turn, plus the bounded 429
-            # cooldown and media retrieval. LiteLLM's default 120s timeout
-            # used to cancel the SSE heartbeat before a final answer/error,
-            # which Agent Zero displayed as an empty model response.
-            model.kwargs.update(num_retries=0,a0_retry_attempts=0,timeout=600)
+            # Three browser slots are permanent; a fourth request can wait in
+            # the queue before its own (up to 540s) generation begins. Keep
+            # the client timeout above one full queue wave plus one full turn.
+            # This is a transport safety bound, not a completion timer.
+            model.kwargs.update(num_retries=0,a0_retry_attempts=0,timeout=1200)
         bind(self.agent, kwargs.get('call_data', {}), 'main')

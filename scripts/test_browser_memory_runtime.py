@@ -100,7 +100,7 @@ async def main():
         await BrowserSession(frozen_agent).execute(call_data={"model": model})
     assert data["browser_model_lock"]["preset_name"] == "Power"
     assert data["chat_model_override"]["chat"]["name"] == "chatgpt-browser"
-    assert model.kwargs["timeout"] == 600
+    assert model.kwargs["timeout"] == 1200
     mutable_context.agent0 = frozen_agent
     global_qwen = {"chat_model": {"provider": "other", "name": "qwen-local"}, "vision_model": {}, "utility_model": {}, "embedding_model": {}}
     with patch.object(model_config, "get_config", return_value=global_qwen):
