@@ -95,4 +95,19 @@ class State(ApiHandler):
                     status.update({"lastOutcome": None, "lastError": None, "lastAuditAt": None})
                     _write(STATUS, status)
             return _snapshot()
+        if action == "clear_all":
+            _write(INCIDENTS, [])
+            return _snapshot()
+        if action == "remove":
+            incident_id = str(input.get("id", ""))
+            if not incident_id:
+                return {"success": False, "error": "ID do relatório ausente."}
+            incidents = _read(INCIDENTS, [])
+            if not isinstance(incidents, list):
+                incidents = []
+            remaining = [item for item in incidents if str(item.get("id", "")) != incident_id]
+            if len(remaining) == len(incidents):
+                return {"success": False, "error": "Relatório não encontrado."}
+            _write(INCIDENTS, remaining)
+            return _snapshot()
         return {"success": False, "error": f"Ação desconhecida: {action}"}

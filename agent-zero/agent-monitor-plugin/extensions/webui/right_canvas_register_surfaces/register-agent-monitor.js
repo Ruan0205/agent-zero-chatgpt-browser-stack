@@ -35,11 +35,11 @@ async function runtimeConfig() {
 }
 
 
-async function monitorUrl() {
+async function monitorUrl(port) {
   const config = await runtimeConfig();
   if (!config.password) throw new Error("A credencial automática do VNC não foi configurada.");
   const url = new URL(window.location.href);
-  url.port = "50081";
+  url.port = String(port);
   url.pathname = "/vnc.html";
   url.search = "";
   url.hash = "";
@@ -48,6 +48,41 @@ async function monitorUrl() {
   url.searchParams.set("resize", "scale");
   url.searchParams.set("password", config.password);
   return url.toString();
+}
+
+let previewTimer;
+let previewRequest = false;
+async function syncPreview(root) {
+  if (previewRequest) return;
+  previewRequest = true;
+  const frame = root.querySelector('.agent-monitor-frame');
+  try {
+    const contextId = String(getContext() || '').trim();
+    if (!contextId) throw new Error('Selecione um chat.');
+    const response = await globalThis.fetchApi('/plugins/_agent_monitor/preview_route', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({context_id:contextId}),
+    });
+    if (!response.ok) throw new Error(`Vínculo indisponível (${response.status}).`);
+    const route = await response.json();
+    if (contextId !== String(getContext() || '').trim()) return;
+    if (route.status !== 'ready' || ![1,2,3].includes(route.slot)) {
+      root.dataset.preview = 'waiting';
+      if (frame?.src && frame.src !== 'about:blank') frame.src='about:blank';
+      setStatus(root, route.status==='busy'?'loading':'offline',
+        route.status==='busy'?'Navegador ocupado com outro chat…':'Aguardando este chat…');
+      return;
+    }
+    const config=await runtimeConfig();
+    const port=Number(config.ports?.[route.slot-1] || Number(config.port || 50081)+(route.slot-1)*2);
+    const url=await monitorUrl(port);
+    root.dataset.preview='ready';
+    if (frame && frame.src !== url) frame.src=url;
+    setStatus(root,'online',`VNC ${route.slot} · chat selecionado`);
+  } catch(error) {
+    root.dataset.preview='waiting';
+    if (frame?.src && frame.src !== 'about:blank') frame.src='about:blank';
+    setStatus(root,'offline',error.message || 'Vínculo indisponível');
+  } finally { previewRequest=false; }
 }
 
 
@@ -71,15 +106,14 @@ function wirePanel(root) {
   frame.addEventListener("error", () => setStatus(root, "offline", "Indisponível"));
   refresh?.addEventListener("click", async () => {
     setStatus(root, "loading", "Reconectando…");
-    try {
-      frame.src = await monitorUrl();
-    } catch (error) {
-      setStatus(root, "offline", error.message || "Configuração indisponível");
-    }
+    await syncPreview(root);
   });
   popout?.addEventListener("click", async () => {
     try {
-      window.open(await monitorUrl(), "_blank", "noopener");
+      const route=await globalThis.fetchApi('/plugins/_agent_monitor/preview_route', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({context_id:String(getContext()||'')})}).then(r=>r.json());
+      if(route.status!=='ready') throw new Error('O navegador deste chat ainda não está disponível.');
+      const config=await runtimeConfig();
+      window.open(await monitorUrl(Number(config.ports?.[route.slot-1] || Number(config.port||50081)+(route.slot-1)*2)), "_blank", "noopener");
     } catch (error) {
       setStatus(root, "offline", error.message || "Configuração indisponível");
     }
@@ -98,16 +132,11 @@ export default async function registerAgentMonitorSurface(surfaces) {
       const root = await waitForElement('[data-surface-id="agent-monitor"] .agent-monitor-surface');
       if (!root) throw new Error("O painel do ChatGPT Browser não foi montado.");
       wirePanel(root);
-      const frame = root.querySelector(".agent-monitor-frame");
-      if (frame && (!frame.src || frame.src === "about:blank")) {
-        try {
-          frame.src = await monitorUrl();
-        } catch (error) {
-          setStatus(root, "offline", error.message || "Configuração indisponível");
-          throw error;
-        }
-      }
+      await syncPreview(root);
+      globalThis.clearInterval(previewTimer);
+      previewTimer=globalThis.setInterval(()=>syncPreview(root),3000);
     },
-    async close() {},
+    async close() { globalThis.clearInterval(previewTimer); previewTimer=null; },
   });
 }
+import { getContext } from "/index.js";

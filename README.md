@@ -106,7 +106,7 @@ Substitua `HOST` pelo IP ou DNS do servidor:
 | ChatGPT Utility | `http://HOST:50084/vnc.html?autoconnect=1&resize=scale` | `VNC_PASSWORD` |
 | VS Code | `http://HOST:50082/` | integrado à stack |
 
-O ícone **ChatGPT Browser (VNC)** dentro do Agent Zero abre a mesma tela `:50081/vnc.html` e injeta a senha automaticamente apenas depois do login no Agent Zero.
+O ícone **ChatGPT Browser (VNC)** dentro do Agent Zero consulta o vínculo do chat selecionado e abre a VNC correspondente (`50081`, `50083` ou `50085`), sem mostrar uma conversa de outro chat. Quando a conversa ainda não foi vinculada ou sua instância está ocupada, o painel aguarda em vez de exibir a tela errada. A senha é injetada automaticamente somente após o login no Agent Zero.
 As outras duas telas são acessíveis diretamente nas portas 50083 e 50085. O gateway mantém
 o mapa entre chat Agent Zero, conversa web e display; pedidos adicionais aguardam o display atribuído.
 
@@ -148,6 +148,10 @@ Os presets ficam em `agent-zero/seed/plugins/_model_config/presets.yaml` e são 
 - **Default:** Qwen 3.8 uncensored via Featherless.
 - **Efficiency:** o mesmo caminho serial Featherless, priorizando estabilidade.
 - **Power:** `chatgpt-browser`, endpoint interno `http://chatgpt-browser-agent:8000/v1`.
+  O chat do navegador guarda a conversa longa; o Agent Zero retém apenas o
+  histórico necessário à execução e compacta localmente ao atingir 80% do
+  orçamento. Depois da primeira mensagem, o preset de um chat Power fica
+  fixo para não trocar silenciosamente sua conversa vinculada.
 - **Utility:** `chatgpt-browser-utility`, endpoint interno
   `http://chatgpt-browser-utility:8000/v1`, um Chrome/VNC dedicado. Históricos que
   excedam o orçamento são lidos em trechos completos e resumidos pelo próprio GPT;
@@ -190,6 +194,13 @@ docker compose up -d --build
 set -a; . ./.env; set +a
 ./scripts/doctor.sh
 ```
+
+Os containers do pool principal, Utility e Agent Zero têm limites de RAM/swap
+no Compose. Eles evitam que essas instâncias consumam toda a memória do host;
+em carga extrema um processo do navegador ainda pode ser reiniciado, mas o
+servidor não deve depender do OOM global para recuperar memória. O painel
+**Auditoria de respostas** permite remover um relatório individual ou usar
+**Limpar lista** para remover todos os relatórios exibidos.
 
 ### Backup
 
@@ -346,7 +357,9 @@ G. Entrada Agent Zero→ChatGPT, novamente no MESMO chat e uma extensão por vez
 H. WhatsApp, se habilitado: somente self-chat autorizado; texto, imagem, documento e áudio;
    ausência do prefixo do bot; nenhum contato/grupo externo; Meta AI isolada. Não envie
    mensagens reais fora dos destinos explicitamente autorizados.
-I. Memória/contexto: compactação a 85%, erro da extensão de memória não interrompe tarefa,
+I. Memória/contexto: compactação a 80% nos chats Power, saída de ferramenta longa salva
+   integralmente em arquivo e limitada apenas na cópia enviada ao modelo, timeout do
+   cliente Power maior que o orçamento do bridge, erro da extensão de memória não interrompe tarefa,
    tarefa não termina pela metade, resposta repetida é limitada, chat novo recebe somente
    instruções fixas necessárias, sem vazar histórico de outro chat.
 
@@ -419,7 +432,10 @@ G. Entrada no MESMO chat: envie pela interface/API real uma imagem PNG, um ZIP, 
    Recomece do zero apenas a unidade que precisar de correção.
 H. WhatsApp opcional: self-chat exclusivo, texto/imagem/documento/áudio, nenhum prefixo,
    nenhuma resposta a outros chats; bridge Meta AI separada. Não contate terceiros.
-I. Contexto/memória: compactação a 85%, falha de memorização não derruba execução, sem
+I. Contexto/memória: compactação a 80% nos chats Power, preservando a pergunta atual
+   após longas sequências de ferramentas; saída extensa integral em arquivo, prévia
+   limitada para o modelo; timeout do cliente maior que o orçamento do bridge;
+   falha de memorização não derruba execução, sem
    conclusão precoce, repetição limitada, chat novo limpo e nenhuma memória cruzada.
 
 ROLLBACK E ENTREGA

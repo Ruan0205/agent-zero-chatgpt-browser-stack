@@ -76,6 +76,10 @@ services:
     stop_grace_period: 15m
     init: true
     shm_size: 2gb
+    # Three permanent Chromium sessions share a 10 GiB host. Bound the pool
+    # before the host and swap are exhausted; Docker restarts on cgroup OOM.
+    mem_limit: 3584m
+    memswap_limit: 4608m
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
@@ -120,6 +124,8 @@ services:
     stop_grace_period: 15m
     init: true
     shm_size: 1gb
+    mem_limit: 1280m
+    memswap_limit: 1792m
     entrypoint: /usr/local/bin/browser-utility-entrypoint
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
@@ -161,6 +167,8 @@ services:
     user: root
     privileged: true
     pid: host
+    mem_limit: 1792m
+    memswap_limit: 2304m
     env_file: [.env]
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
@@ -188,8 +196,14 @@ services:
       - ./agent-zero/overrides/call_subordinate.py:/a0/tools/call_subordinate.py:ro
       - ./agent-zero/overrides/_50_memorize_fragments.py:/a0/plugins/_memory/extensions/python/monologue_end/_50_memorize_fragments.py:ro
       - ./agent-zero/overrides/_51_memorize_solutions.py:/a0/plugins/_memory/extensions/python/monologue_end/_51_memorize_solutions.py:ro
+      - ./agent-zero/overrides/_10_organize_history.py:/a0/extensions/python/message_loop_end/_10_organize_history.py:ro
+      - ./agent-zero/overrides/model_override.py:/a0/plugins/_model_config/api/model_override.py:ro
+      - ./agent-zero/overrides/model_presets.py:/a0/plugins/_model_config/api/model_presets.py:ro
+      - ./agent-zero/overrides/model_config.py:/a0/plugins/_model_config/helpers/model_config.py:ro
       - ./agent-zero/overrides/_30_repeat_response.py:/a0/extensions/python/message_loop_result/_30_repeat_response.py:ro
       - ./agent-zero/overrides/_90_organize_history_wait.py:/a0/extensions/python/message_loop_prompts_before/_90_organize_history_wait.py:ro
+      - ./agent-zero/overrides/_95_bound_large_tool_result.py:/a0/extensions/python/hist_add_tool_result/_95_bound_large_tool_result.py:ro
+      - ./agent-zero/overrides/agent.system.tool.code_exe.md:/a0/plugins/_code_execution/prompts/agent.system.tool.code_exe.md:ro
       - ./agent-zero/overrides/agent.system.solutions.md:/a0/plugins/_memory/prompts/agent.system.solutions.md:ro
       - ./agent-zero/overrides/fw.msg_repeat.md:/a0/prompts/fw.msg_repeat.md:ro
       - ./agent-zero/overrides/download_work_dir_file.py:/a0/api/download_work_dir_file.py:ro

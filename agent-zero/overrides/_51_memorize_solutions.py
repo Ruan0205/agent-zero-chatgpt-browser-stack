@@ -9,12 +9,20 @@ from helpers.defer import DeferredTask, THREAD_BACKGROUND
 # Direct import - this extension lives inside the memory plugin
 from plugins._memory.helpers.memory import Memory
 from plugins._memory.tools.memory_load import DEFAULT_THRESHOLD as DEFAULT_MEMORY_THRESHOLD
+from plugins._model_config.helpers import model_config
+
+def browser_owns_memory(agent):
+    name = str(model_config.get_chat_model_config(agent).get('name') or '')
+    return name.startswith('chatgpt-browser')
 
 class MemorizeSolutions(Extension):
 
     def execute(self, loop_data: LoopData = LoopData(), **kwargs):
         # try:
         if not self.agent:
+            return
+
+        if browser_owns_memory(self.agent):
             return
 
         set = plugins.get_plugin_config("_memory", self.agent)
@@ -37,6 +45,9 @@ class MemorizeSolutions(Extension):
 
     async def memorize(self, loop_data: LoopData, log_item: LogItem, **kwargs):
         if not self.agent:
+            return
+
+        if browser_owns_memory(self.agent):
             return
 
         try:

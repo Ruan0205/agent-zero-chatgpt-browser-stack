@@ -76,6 +76,7 @@ function render(root, state) {
     text(resolve, item.resolved ? "Reabrir" : "Marcar como resolvido");
     resolve?.addEventListener("click", async () => render(root, await api("resolve", { id: item.id, resolved: !item.resolved })));
     card.querySelector(".incident-copy")?.addEventListener("click", () => navigator.clipboard?.writeText(JSON.stringify(item, null, 2)));
+    card.querySelector(".incident-remove")?.addEventListener("click", async () => render(root, await api("remove", { id: item.id })));
     list.append(card);
   }
 }
@@ -98,7 +99,7 @@ function wire(root) {
     render(root, await api("set_enabled", { enabled }));
   });
   root.querySelector(".incident-refresh")?.addEventListener("click", () => refresh(root));
-  root.querySelector(".incident-clear")?.addEventListener("click", async () => render(root, await api("clear_resolved")));
+  root.querySelector(".incident-clear")?.addEventListener("click", async () => render(root, await api("clear_all")));
 }
 
 let pollTimer = null;

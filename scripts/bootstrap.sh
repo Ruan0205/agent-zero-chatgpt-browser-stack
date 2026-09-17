@@ -57,7 +57,9 @@ if [ "${#VNC_PASSWORD}" -gt 8 ]; then
   exit 1
 fi
 
-printf '{"password":"%s","port":"%s"}\n' "$VNC_PASSWORD" "${CHATGPT_VNC_PORT:-50081}" \
+printf '{"password":"%s","port":"%s","ports":["%s","%s","%s"]}\n' \
+  "$VNC_PASSWORD" "${CHATGPT_VNC_PORT:-50081}" \
+  "${CHATGPT_VNC_PORT:-50081}" "${CHATGPT_VNC_2_PORT:-50083}" "${CHATGPT_VNC_3_PORT:-50085}" \
   > "$data_root/agent-monitor/vnc-runtime.json"
 chmod 0600 "$data_root/agent-monitor/vnc-runtime.json"
 

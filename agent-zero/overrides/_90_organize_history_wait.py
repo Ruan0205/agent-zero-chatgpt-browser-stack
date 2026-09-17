@@ -3,9 +3,12 @@ from agent import LoopData
 from extensions.python.message_loop_end._10_organize_history import (
     DATA_NAME_TASK,
     compress_history,
+    compact_oversized_browser_messages,
+    browser_history_tail,
 )
 from helpers.defer import DeferredTask, THREAD_BACKGROUND
 from helpers.history import Message, clear_responses_provider_state
+from plugins._model_config.helpers import model_config
 
 MAX_SYNC_COMPRESSION_PASSES = 64
 FALLBACK_KEEP_RECENT_MESSAGES = 12
@@ -16,6 +19,25 @@ FALLBACK_ENTRY_CHAR_LIMIT = 240
 class OrganizeHistoryWait(Extension):
     async def execute(self, loop_data: LoopData = LoopData(), **kwargs):
         if not self.agent:
+            return
+
+        chat_config = model_config.get_chat_model_config(self.agent)
+        if str(chat_config.get('name') or '').startswith('chatgpt-browser'):
+            # ChatGPT's mapped conversation owns old turns. Keep only the
+            # working tail in Agent Zero, without invoking another LLM.
+            limit = int(chat_config.get('ctx_length') or 65536) * 0.8
+            if compact_oversized_browser_messages(self.agent.history):
+                clear_responses_provider_state(self.agent)
+            keep = 12
+            while self.agent.history.get_tokens() >= limit and keep >= 1:
+                before = self.agent.history.get_tokens()
+                if not self._compact_browser_history(keep):
+                    keep //= 2
+                    continue
+                if self.agent.history.get_tokens() >= before:
+                    keep //= 2
+            if self.agent.history.get_tokens() >= limit:
+                self._log_compression_stalled(before, self.agent.history.get_tokens())
             return
 
         # sync action only required if the history is too large, otherwise leave it in background
@@ -66,6 +88,28 @@ class OrganizeHistoryWait(Extension):
                     before_tokens, after_tokens, max_passes=True
                 )
                 break
+
+    def _compact_browser_history(self, keep_count: int) -> bool:
+        history = self.agent.history
+        messages = list(history.all_messages())
+        if len(messages) <= keep_count:
+            return False
+        recent = browser_history_tail(messages, keep_count)
+        summary = Message(
+            ai=False,
+            content='[Earlier turns remain in this chat\'s linked ChatGPT browser conversation.]',
+            sequence=int(getattr(messages[0], 'sequence', 0) or 0),
+        )
+        history.bulks = []
+        history.topics = []
+        history.current.summary = ''
+        history.current.messages = [summary, *recent]
+        clear_responses_provider_state(self.agent)
+        self.agent.context.log.log(
+            type='info', heading='Browser chat history compacted locally',
+            content=f'Kept {keep_count} recent Agent Zero messages; older context stays in the mapped browser chat.',
+        )
+        return True
 
     def _apply_deterministic_fallback(self) -> bool:
         if not self.agent:

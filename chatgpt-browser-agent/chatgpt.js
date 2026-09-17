@@ -560,11 +560,19 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
   fs.mkdirSync(outDir,{recursive:true,mode:0o755});
   const artifacts=[];
   const seenHashes=new Set();
+  const sniffImageMime=buffer=>{
+    if(buffer.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'))) return 'image/png';
+    if(buffer.subarray(0,3).equals(Buffer.from('ffd8ff','hex'))) return 'image/jpeg';
+    if(buffer.subarray(0,4).toString('ascii')==='GIF8') return 'image/gif';
+    if(buffer.subarray(0,4).toString('ascii')==='RIFF'&&buffer.subarray(8,12).toString('ascii')==='WEBP') return 'image/webp';
+    return '';
+  };
   const extFor=mime=>({
     'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','image/gif':'.gif',
     'application/pdf':'.pdf','application/zip':'.zip','text/plain':'.txt',
   }[mime]||'');
   const mimeForName=name=>({
+    '.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif',
     '.txt':'text/plain','.md':'text/markdown','.json':'application/json','.xml':'application/xml',
     '.yaml':'application/yaml','.yml':'application/yaml','.html':'text/html','.htm':'text/html',
     '.svg':'image/svg+xml','.py':'text/x-python','.js':'text/javascript','.ts':'text/typescript',
@@ -581,13 +589,15 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
     const hash=crypto.createHash('sha256').update(buffer).digest('hex');
     if(seenHashes.has(hash)) continue;
     seenHashes.add(hash);
+    const detectedMime=sniffImageMime(buffer);
     let original=String(item.name||'').replace(/[\\/:*?"<>|\r\n]/g,' ').trim();
-    if(!original || original.length>120) original=`chatgpt-file${extFor(item.mime)}`;
+    if(!original || original.length>120) original=`chatgpt-file${extFor(detectedMime||item.mime)}`;
+    else if(!path.extname(original)) original+=extFor(detectedMime||item.mime);
     let ext=path.extname(original).slice(0,12);
     if(!ext) ext=extFor(item.mime);
     const filename=`chatgpt-${crypto.randomUUID()}${ext}`;
     fs.writeFileSync(path.join(outDir,filename),buffer,{mode:0o644});
-    const mime=(item.mime&&item.mime!=='application/octet-stream') ? item.mime : (mimeForName(original)||item.mime||'application/octet-stream');
+    const mime=detectedMime || ((item.mime&&item.mime!=='application/octet-stream') ? item.mime : (mimeForName(original)||item.mime||'application/octet-stream'));
     artifacts.push({filename,originalName:original,mime,size:buffer.length,sha256:hash});
   }
   if(artifacts.length) log(`Collected ${artifacts.length} assistant artifact(s): ${artifacts.map(a=>a.originalName).join(', ')}`);
@@ -857,7 +867,14 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')];
         const userIndex=submittedUser ? turns.findIndex(turn=>turn.getAttribute('data-testid')===submittedUser) : -1;
         const eligible=userIndex>=0 ? turns.slice(userIndex+1) : turns;
-        const latestTurn=eligible.filter(turn=>!turn.querySelector('[data-message-author-role="user"]')&&turn.querySelector('[data-message-author-role="assistant"]')).at(-1);
+        // Native ChatGPT image turns may contain large generated images but no
+        // [data-message-author-role="assistant"] node at all. They are still
+        // the answer to this submitted user turn, not a timeout.
+        const hasGeneratedMedia=turn=>[...turn.querySelectorAll('img[src],a[href]')].some(el=>
+          el.tagName==='IMG' ? (el.naturalWidth||0)>=128 && (el.naturalHeight||0)>=128
+            : el.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(el.href||''));
+        const latestTurn=eligible.filter(turn=>!turn.querySelector('[data-message-author-role="user"]')
+          && (turn.querySelector('[data-message-author-role="assistant"]')||hasGeneratedMedia(turn))).at(-1);
         const currentAssistant=latestTurn?.querySelector('[data-message-author-role="assistant"]');
         const turn=latestTurn?.getAttribute('data-testid');
         const text=(currentAssistant?.innerText||'').trim();
@@ -911,6 +928,8 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
   let stableCount = 0;
   let stableEnvelope = '';
   let envelopeSince = 0;
+  let stablePlainText = '';
+  let plainTextSince = 0;
   let stableMedia = '';
   let mediaSince = 0;
   let stableDownloadText = '';
@@ -918,6 +937,8 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
   const deadline = requestDeadline;
   while (stableCount < 3) {
     if (Date.now() > deadline) throw new Error('Timed out waiting for final response; partial text not returned');
+    const rejection=await readProviderRejection(page);
+    if(rejection) throw new Error(`ChatGPT rejected the request: ${rejection}`);
     await new Promise(r => setTimeout(r, 1000));
     const state = await page.evaluate(expectedTurnId => {
       const turn = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]')).at(-1);
@@ -953,26 +974,26 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
     const downloadText=/\bDownload\s+[^\n]+\.[a-z0-9.]{1,12}\b/i.test(state.text||'') ? state.text : '';
     if(downloadText && downloadText===stableDownloadText) {
       if(!downloadTextSince) downloadTextSince=Date.now();
-      if(Date.now()-downloadTextSince>=15000) {
+      if(Date.now()-downloadTextSince>=5000) {
         const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
         if(stop) await stop.click();
         if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(page.url()))
           fs.writeFileSync(SESSION_FILE, page.url(), 'utf8');
-        log('Recovered stable downloadable-file response after 15 seconds; collecting artifacts');
+        log('Recovered stable downloadable-file response after 5 seconds; collecting artifacts');
         return state.text;
       }
     } else { stableDownloadText=downloadText; downloadTextSince=downloadText?Date.now():0; }
     if(state.media && state.media===stableMedia) {
       if(!mediaSince) mediaSince=Date.now();
-      if(Date.now()-mediaSince>=15000) {
+      if(Date.now()-mediaSince>=5000) {
         const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
         if(stop) await stop.click();
-        log('Recovered stable native media after 15 seconds; collecting artifacts');
+        log('Recovered stable native media after 5 seconds; collecting artifacts');
         return state.text || 'Mídia pronta.';
       }
     } else { stableMedia=state.media||''; mediaSince=state.media?Date.now():0; }
     if(state.envelope && state.envelope===stableEnvelope) {
-      if(Date.now()-envelopeSince>=15000) {
+      if(Date.now()-envelopeSince>=5000) {
         // A single complete machine envelope is the entire A0 response.
         // Quiesce this generation before releasing the serialized browser.
         const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
@@ -983,11 +1004,26 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         if(current!==state.envelope) throw new Error('Response changed while recovering stalled generation');
         if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(page.url()))
           fs.writeFileSync(SESSION_FILE, page.url(), 'utf8');
-        await page.goto('about:blank',{waitUntil:'domcontentloaded',timeout:10000});
-        log('Recovered complete JSON envelope after 15 seconds unchanged; page quiesced');
+        log('Recovered complete JSON envelope after 5 seconds unchanged; mapped chat kept visible');
         return state.envelope;
       }
     } else {stableEnvelope=state.envelope;envelopeSince=Date.now();}
+    // ChatGPT can leave "Stop answering" mounted after a complete short
+    // plain-text turn, without ever adding the usual Copy action. Wait for a
+    // longer quiet interval than structured JSON and verify after stopping.
+    if(!state.envelope && state.text?.trim() && !/^(?:analyzing|thinking|working|generating|processing)(?:\.{0,3}|\s+\d+%)?$/i.test(state.text.trim())) {
+      if(state.text===stablePlainText) {
+        if(Date.now()-plainTextSince>=12000) {
+          const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
+          if(stop) await stop.click().catch(()=>{});
+          await new Promise(r=>setTimeout(r,500));
+          const current=await extractLastAssistantMessage(page);
+          if(current!==state.text.trim()) throw new Error('Plain response changed during stalled-generation recovery');
+          log('Recovered stable plain response after 12 seconds; mapped chat kept visible');
+          return current;
+        }
+      } else { stablePlainText=state.text; plainTextSince=Date.now(); }
+    } else { stablePlainText=''; plainTextSince=0; }
   }
 }
 
@@ -1065,7 +1101,25 @@ async function startDaemonProcess() {
     };
 
     if (req.method === 'GET' && req.url === '/status') {
-      return send(200, { ok: true, pid: process.pid });
+      return send(200, { ok: true, pid: process.pid, busy, url: page.url().split('?')[0] });
+    }
+
+    if (req.method === 'POST' && req.url === '/focus') {
+      if (busy) return send(409, {ok:false, busy:true, url:page.url().split('?')[0]});
+      let body='';
+      req.on('data', chunk => { body += chunk; if(body.length>4096) req.destroy(); });
+      req.on('end', async()=>{
+        let target;
+        try { target=JSON.parse(body).chatUrl; } catch { return send(400,{ok:false}); }
+        if(!/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(target)) return send(400,{ok:false});
+        busy=true;
+        try {
+          if(page.url().split('?')[0]!==target) await page.goto(target,{waitUntil:'domcontentloaded',timeout:30000});
+          send(200,{ok:true,url:page.url().split('?')[0]});
+        } catch(error) { send(503,{ok:false,error:error.message}); }
+        finally { busy=false; }
+      });
+      return;
     }
 
     if (req.method === 'GET' && req.url === '/diagnostics') {
@@ -1405,8 +1459,9 @@ async function startDaemonProcess() {
             if(stillBusy) {
               const current=page.url().split('?')[0];
               if(/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(current)) fs.writeFileSync(SESSION_FILE,current,'utf8');
-              await page.goto('about:blank',{waitUntil:'domcontentloaded',timeout:10000});
-              log('Detached from a completed artifact turn whose stop control remained mounted');
+              const stop=await page.$('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "]');
+              if(stop) await stop.click().catch(()=>{});
+              log('Stopped stale generation control after artifact collection; mapped chat kept visible');
             }
           }
           if(temporaryChat) {
@@ -1414,7 +1469,9 @@ async function startDaemonProcess() {
             if(fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
             log('Temporary audit tab closed and session pointer removed.');
           }
-          send(200, { ok: true, response: output, artifacts, temporary:temporaryChat });
+          const completedChatUrl = page.url().split('?')[0];
+          send(200, { ok: true, response: output, artifacts, temporary:temporaryChat,
+            chatUrl: /^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(completedChatUrl) ? completedChatUrl : null });
         } catch (err) {
           log(`Error: ${err.message}`);
           // Return the URL owned by this exact request.  The global session
@@ -1711,6 +1768,9 @@ Usage:
     console.log('--- ARTIFACTS ---');
     console.log(JSON.stringify(result.artifacts||[]));
     console.log('--- END ARTIFACTS ---');
+    console.log('--- CHAT URL ---');
+    console.log(result.chatUrl || '');
+    console.log('--- END CHAT URL ---');
     if (opts.save) {
       fs.writeFileSync(path.resolve(opts.save), result.response, 'utf8');
       console.error(`[*] Response saved to: ${path.resolve(opts.save)}`);

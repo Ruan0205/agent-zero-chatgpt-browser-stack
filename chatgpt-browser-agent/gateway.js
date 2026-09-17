@@ -448,7 +448,8 @@ async function runBrowser(slot, prompt, chatUrl, options={}) {
       const artifactMatch=stdout.match(/--- ARTIFACTS ---\s*([\s\S]*?)\s*--- END ARTIFACTS ---/);
       let artifacts=[];
       if(artifactMatch) { try { artifacts=JSON.parse(artifactMatch[1]); } catch {} }
-      resolve({raw:match[1].trim(),artifacts:Array.isArray(artifacts)?artifacts:[]});
+      const returnedChatUrl=stdout.match(/--- CHAT URL ---\s*(https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+)\s*--- END CHAT URL ---/)?.[1] || null;
+      resolve({raw:match[1].trim(),artifacts:Array.isArray(artifacts)?artifacts:[],chatUrl:returnedChatUrl});
     });
   });
 }
@@ -512,6 +513,41 @@ function streamError(res,error) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if(req.method==='POST' && req.url==='/v1/preview-route') {
+    try {
+      const input=await readJson(req);
+      const contextId=String(input.context_id||'');
+      if(!/^[\w-]{1,160}$/.test(contextId)) return json(res,400,{error:'Invalid context ID'});
+      const chatHash='v2-'+crypto.createHash('sha256').update(JSON.stringify([contextId,'main:0'])).digest('hex');
+      const chatUrl=loadChatMap()[chatHash];
+      if(!chatUrl) return json(res,200,{status:'unmapped'});
+      let slotId=pool.assignments[chatHash];
+      if(!slotId) {
+        const candidates=[...pool.slots.values()].filter(item=>Number(String(item.id).match(/^browser-(\d+)$/)?.[1])<=3);
+        const existing=candidates.find(item=>latestSessionChatUrl(item)===chatUrl);
+        const selected=existing||candidates.sort((a,b)=>Number(b.state==='ready')-Number(a.state==='ready')
+          ||Number(a.busy)-Number(b.busy)||a.queued-b.queued||a.lastUsed-b.lastUsed)[0];
+        if(!selected) return json(res,200,{status:'warming'});
+        slotId=selected.id;
+        pool.assignments[chatHash]=slotId;
+        pool.saveAssignments(pool.assignments);
+      }
+      const slot=pool.slots.get(slotId);
+      const index=Number(String(slotId).match(/^browser-(\d+)$/)?.[1]);
+      if(!slot||!Number.isInteger(index)||index<1||index>3) return json(res,200,{status:'unavailable'});
+      const daemon=loadJsonFile(path.join(BROWSER_POOL_DIR,slotId,'.chatgpt-poc-daemon.json'),{});
+      if(!Number.isInteger(daemon.port)||daemon.port<1||daemon.port>65535)
+        return json(res,200,{status:'warming',slot:index});
+      const base=`http://127.0.0.1:${daemon.port}`;
+      let state=await fetch(`${base}/status`,{signal:AbortSignal.timeout(3000)}).then(r=>r.json());
+      if(state.url!==chatUrl) {
+        if(state.busy||slot.busy||slot.queued) return json(res,200,{status:'busy',slot:index});
+        const focus=await fetch(`${base}/focus`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chatUrl}),signal:AbortSignal.timeout(35000)});
+        state=await focus.json();
+      }
+      return json(res,200,{status:state.url===chatUrl?'ready':'busy',slot:index});
+    } catch(error) { return json(res,503,{status:'unavailable',error:error.message}); }
+  }
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/v1/health')) {
     const profile = fs.existsSync(path.join(STATE_DIR, '.chatgpt-poc-profile'));
     const session = fs.existsSync(path.join(STATE_DIR, '.chatgpt-poc-session'));
@@ -651,7 +687,7 @@ const server = http.createServer(async (req, res) => {
 
             // Exactly one startup recovery inside this attempt. Provider 429
             // retries are handled by the outer loop with their own fresh budget.
-            if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl(slot);
+            if(!chatUrl) chatUrl=requestChatUrlFromError(error);
             if(!chatUrl) throw new Error('Recovery refused: the current request chat URL was not returned by the browser');
             console.warn(`[recovery] Browser response stalled; reloading the same chat once with ${remainingBudget()}ms left`);
             auditEvents.push('A resposta visível travou; o mesmo chat foi recarregado uma vez para recuperação.');
@@ -669,28 +705,24 @@ const server = http.createServer(async (req, res) => {
             break;
           } catch(error) {
             if(!isProviderMessageLimit(error) || rateAttempt>=PROVIDER_429_RETRIES) throw error;
-            if(!chatUrl) chatUrl=requestChatUrlFromError(error) || latestSessionChatUrl(slot);
+            if(!chatUrl) chatUrl=requestChatUrlFromError(error);
             if(!chatUrl) throw new Error('Provider 429 retry refused: the current ChatGPT chat URL is unknown');
             console.warn(`[provider-429] attempt ${rateAttempt+1}/${PROVIDER_429_RETRIES} failed; waiting ${PROVIDER_429_RETRY_DELAY_MS}ms, then reloading the same chat and retrying`);
             auditEvents.push(`O provedor retornou limite de mensagens; retentativa ${rateAttempt+1}/${PROVIDER_429_RETRIES} após ${PROVIDER_429_RETRY_DELAY_MS} ms.`);
             await providerCooldown.wait();
           }
         }
-        if (!chatUrl && chatHash) {
-          try {
-            const sessionFile = path.join(slot.stateDir, '.chatgpt-poc-session');
-            if (fs.existsSync(sessionFile)) {
-              const newChatUrl = fs.readFileSync(sessionFile, 'utf8').trim();
-              if (/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(newChatUrl)) {
-                const chatMap = loadChatMap();
-                chatMap[chatHash] = newChatUrl;
-                saveChatMap(chatMap);
-                chatUrl = newChatUrl;
-                console.log(`[chatmap] Saved new chat for hash ${chatHash}: ${newChatUrl}`);
-              }
-            }
-          } catch(e) {
-            console.warn(`[chatmap] Failed to save chat URL: ${e.message}`);
+        if (/^main(?:[:]|$)/i.test(callScope) && chatHash) {
+          const returnedUrl=browserResult.chatUrl;
+          if(!returnedUrl) throw new Error('Browser did not confirm the request conversation URL; refusing to guess from another tab');
+          if(chatUrl && returnedUrl!==chatUrl) throw new Error('Browser returned a different conversation URL; refusing cross-chat response');
+          if(!chatUrl) {
+            const chatMap=loadChatMap();
+            if(chatMap[chatHash] && chatMap[chatHash]!==returnedUrl) throw new Error('Conversation binding changed during request');
+            chatMap[chatHash]=returnedUrl;
+            saveChatMap(chatMap);
+            chatUrl=returnedUrl;
+            console.log(`[chatmap] Saved new chat for hash ${chatHash}: ${returnedUrl}`);
           }
         }
         const remember=()=>{
@@ -745,6 +777,21 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, openAiResponse(answer, prompt));
     } catch (error) {
       if(streamHeartbeat) { clearInterval(streamHeartbeat); streamHeartbeat=null; }
+      // A first request may have created its ChatGPT conversation and then
+      // failed while reading the response. Preserve that exact request URL so
+      // the next Agent Zero retry cannot open an unrelated new conversation.
+      if(/^main(?:[:]|$)/i.test(auditCallScope)) {
+        const failedChatHash=conversationKey(req);
+        const failedChatUrl=requestChatUrlFromError(error);
+        if(failedChatHash && failedChatUrl) {
+          const map=loadChatMap();
+          if(!map[failedChatHash]) {
+            map[failedChatHash]=failedChatUrl;
+            saveChatMap(map);
+            console.warn(`[chatmap] Preserved failed-request binding for ${failedChatHash}: ${failedChatUrl}`);
+          }
+        }
+      }
       if(res.headersSent) {
         return streamError(res,error);
       }

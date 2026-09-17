@@ -89,6 +89,9 @@
     border: 0;
     background: #181818;
   }
+  .agent-monitor-placeholder {display:none;place-items:center;text-align:center;padding:24px;color:#aebbd0;font:500 14px/1.5 system-ui,sans-serif}
+  .agent-monitor-surface[data-preview="waiting"] .agent-monitor-frame {display:none}
+  .agent-monitor-surface[data-preview="waiting"] .agent-monitor-placeholder {display:grid}
 </style>
 
 <div class="agent-monitor-surface">
@@ -113,4 +116,5 @@
     title="ChatGPT Browser via noVNC"
     allow="clipboard-read; clipboard-write; microphone"
   ></iframe>
+  <div class="agent-monitor-placeholder">Aguardando o navegador vinculado a este chat. Nenhum outro chat será exibido aqui.</div>
 </div>
