@@ -10,7 +10,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
-COPY chatgpt.js gateway.js browser-pool.js bridge-core.js utility-compactor.js incident-auditor.js audit-eligibility.js provider-cooldown.js provider-rejection.js completion-state.js retry-policy.js mcp-server.js agent.js ./
+COPY chatgpt.js gateway.js browser-pool.js bridge-core.js utility-compactor.js incident-auditor.js provider-cooldown.js provider-rejection.js completion-state.js retry-policy.js mcp-server.js agent.js ./
 COPY entrypoint.sh /usr/local/bin/browser-agent-entrypoint
 COPY utility-entrypoint.sh /usr/local/bin/browser-utility-entrypoint
 COPY manual-login.sh /usr/local/bin/chatgpt-manual-login

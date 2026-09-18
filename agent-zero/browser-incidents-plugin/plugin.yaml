@@ -1,5 +1,5 @@
 name: _browser_incidents
-title: Auditoria de respostas
-description: Auditor temporário e painel de incidentes do ChatGPT Browser.
-version: 1.0.0
+title: Chats com erro
+description: Auditoria manual do histórico completo e da interface do chat selecionado.
+version: 2.0.0
 always_enabled: true

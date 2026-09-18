@@ -1,13 +1,15 @@
 # Changelog
 
-## Em desenvolvimento — três VNCs fixas e auditoria final
+## Em desenvolvimento — três VNCs fixas e auditoria manual
 
 - Três Chromes em displays/noVNC separados; chamadas excedentes ficam em fila, sem escala.
 - Mantém a afinidade persistente chat Agent Zero ↔ conversa web ↔ display e remapeia
   atribuições legadas acima da terceira vaga.
 - Impõe cooldown global mínimo de 30 segundos após "too many requests".
-- Audita apenas envelopes finais `response` do Agent Zero, em display oculto;
-  chamadas de ferramentas e erros de transporte não iniciam auditoria.
+- Remove a auditoria automática. O botão **Chat com erro** analisa sob demanda
+  o histórico completo e um retrato da interface visível em display oculto.
+- Ordena a barra lateral pela atividade persistida: ao selecionar ou enviar uma
+  mensagem, o chat (ou seu grupo pai) passa ao topo.
 
 ## Em desenvolvimento — navegador Utility dedicado
 

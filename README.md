@@ -200,7 +200,7 @@ Os containers do pool principal, Utility e Agent Zero têm limites de RAM/swap
 no Compose. Eles evitam que essas instâncias consumam toda a memória do host;
 em carga extrema um processo do navegador ainda pode ser reiniciado, mas o
 servidor não deve depender do OOM global para recuperar memória. O painel
-**Auditoria de respostas** permite remover um relatório individual ou usar
+**Chats com erro** permite solicitar manualmente a análise do histórico completo e da interface, remover um relatório individual ou usar
 **Limpar lista** para remover todos os relatórios exibidos.
 
 ### Backup
@@ -336,9 +336,9 @@ C. Browser pool: três conversas simultâneas em três VNCs distintas; quarta de
 D. Ferramentas: terminal dentro do container; terminal root no host apenas quando pedido;
    Docker; navegador do Agent Zero; desktop; VS Code por chat; criar/editar/salvar arquivo;
    executar comando; criar Docker Hello World; abrir no navegador; Git init/commit; remover
-   somente o projeto de teste; VNC integrado; painel de incidentes; ligar/desligar auditor.
-   Confirme que só uma resposta final `response` inicia auditoria; chamadas intermediárias
-   de ferramenta e erros de transporte não a iniciam.
+   somente o projeto de teste; VNC integrado; painel de incidentes; botão **Chat com erro**.
+   Confirme que nenhuma resposta inicia auditoria automaticamente e que o botão analisa
+   o histórico completo do chat selecionado junto com o estado visível da interface.
 E. Imagens: no Power, enviar PNG/JPG/WebP junto do prompt, analisar, gerar uma e várias
    imagens, editar imagem anterior e devolver inline. No Qwen, testar a ferramenta Meta AI
    somente se o usuário a pareou; sem pareamento deve falhar de forma clara e limitada.
@@ -416,7 +416,7 @@ B. Modelos: Default Qwen/Featherless, Efficiency, Utility e Power chatgpt-browse
 C. Pool web: três instâncias permanentes simultâneas, cada uma em VNC separada; quarta
    chamada na fila, sem escala; afinidade correta, popup, timeout, erro visual, keep-alive,
    429 com espera global mínima de 30 s e duas tentativas, nenhuma atualização
-   desnecessária e nenhum loop. Confirme auditoria apenas das respostas finais.
+   desnecessária e nenhum loop. Confirme que a auditoria só é iniciada manualmente.
 D. Ferramentas: terminal Agent Zero, host root somente sob pedido, Docker, browser, desktop,
    VS Code individual, editar/executar, Hello World Docker, abrir no browser, Git commit,
    VNC, downloads, painel/auditoria de incidentes e limpeza do projeto de teste.

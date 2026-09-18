@@ -8,7 +8,6 @@ const { spawn } = require('child_process');
 const bridge = require('./bridge-core');
 const { BrowserPool } = require('./browser-pool');
 const { IncidentAuditor } = require('./incident-auditor');
-const { finalResponseText } = require('./audit-eligibility');
 const { ProviderCooldown } = require('./provider-cooldown');
 const { isProviderMessageLimit, retryProviderRejection } = require('./retry-policy');
 const { compactUtilityBody } = require('./utility-compactor');
@@ -212,18 +211,10 @@ function safeChatName(contextId) {
   return String(data.name||data.title||contextId);
 }
 
-function latestQuestion(body) {
-  const message=[...(body?.messages||[])].reverse().find(item=>item.role==='user' && bridge.isCurrentUserMessage(item));
-  return message ? bridge.extractedUserText(bridge.textContent(message.content)) : '';
-}
-
-function enqueueAudit({contextId,callScope,question,response='',error='',events=[],httpStatus=null}) {
-  if(!/^main(?:[:]|$)/i.test(callScope) || !contextId || !question) return false;
-  return auditor.enqueue({
-    chatId:contextId,
-    chatName:safeChatName(contextId),
-    question,response,error,events,httpStatus,
-  });
+function validNoticeToken(req) {
+  const supplied=String(req.headers['x-browser-pool-token']||'');
+  if(!AGENT_ZERO_NOTICE_TOKEN || supplied.length!==AGENT_ZERO_NOTICE_TOKEN.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(AGENT_ZERO_NOTICE_TOKEN));
 }
 
 function readJson(req) {
@@ -515,6 +506,33 @@ function streamError(res,error) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if(req.method==='POST' && req.url==='/v1/audit-chat') {
+    try {
+      if(!validNoticeToken(req)) return json(res,403,{success:false,error:'Invalid audit token'});
+      const input=await readJson(req);
+      const contextId=String(input.context_id||'');
+      if(!/^[\w-]{1,160}$/.test(contextId)) return json(res,400,{success:false,error:'Invalid context ID'});
+      const auditInputName=String(input.audit_input||'');
+      if(!/^audit-context-[a-f0-9-]{36}\.json$/.test(auditInputName))
+        return json(res,400,{success:false,error:'Invalid audit input'});
+      const auditContextFile=path.resolve(INCIDENTS_DIR,'audit-inputs',auditInputName);
+      const auditInputsRoot=path.resolve(INCIDENTS_DIR,'audit-inputs')+path.sep;
+      if(!auditContextFile.startsWith(auditInputsRoot) || !fs.existsSync(auditContextFile))
+        return json(res,404,{success:false,error:'Prepared audit input was not found'});
+      const queued=auditor.enqueue({
+        chatId:contextId,
+        chatName:String(input.chat_name||safeChatName(contextId)).slice(0,300),
+        auditContextFile,
+        question:'Auditoria manual solicitada pelo botão “Chat com erro”.',
+        response:'O histórico completo e o estado visível da interface foram anexados à análise.',
+        events:['Auditoria iniciada manualmente pelo usuário.'],
+        manual:true,
+      },{force:true});
+      return json(res,202,{success:true,queued:Boolean(queued),auditor:auditor.snapshot()});
+    } catch(error) {
+      return json(res,500,{success:false,error:String(error.message||error)});
+    }
+  }
   if(req.method==='POST' && req.url==='/v1/preview-route') {
     try {
       const input=await readJson(req);
@@ -570,10 +588,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
     let streamHeartbeat=null;
-    let auditContextId='';
-    let auditCallScope='';
-    let auditQuestion='';
-    const auditEvents=[];
+    let requestCallScope='';
     try {
       const body = await readJson(req);
       if(body.stream) streamHeartbeat=beginStreamHeartbeat(res);
@@ -582,9 +597,7 @@ const server = http.createServer(async (req, res) => {
       const chatHash = conversationKey(req);
       const contextId=String(req.headers['x-a0-conversation-id']||'');
       const callScope=String(req.headers['x-a0-call-scope']||'');
-      auditContextId=contextId;
-      auditCallScope=callScope;
-      auditQuestion=latestQuestion(body);
+      requestCallScope=callScope;
       let chatUrl = null;
       
       const answer = await pool.run(chatHash,{contextId,callScope},async slot => {
@@ -693,7 +706,6 @@ const server = http.createServer(async (req, res) => {
             if(!chatUrl) chatUrl=requestChatUrlFromError(error);
             if(!chatUrl) throw new Error('Provider 429 retry refused: the current ChatGPT chat URL is unknown');
             console.warn(`[provider-429] attempt ${rateAttempt+1}/${PROVIDER_429_RETRIES} failed; waiting ${PROVIDER_429_RETRY_DELAY_MS}ms, then reloading the same chat and retrying`);
-            auditEvents.push(`O provedor retornou limite de mensagens; retentativa ${rateAttempt+1}/${PROVIDER_429_RETRIES} após ${PROVIDER_429_RETRY_DELAY_MS} ms.`);
             await providerCooldown.wait();
           }
         }
@@ -730,7 +742,6 @@ const server = http.createServer(async (req, res) => {
             ? `The file already exists at ${createdPath}. Do not recreate or modify it. Return a real clickable Markdown download link exactly in this form: [Download ${createdPath.split('/').pop()}](sandbox:${createdPath}). Then add one short completion sentence.`
             : 'The requested file was not exposed as a downloadable artifact. Do not repeat unrelated work. Locate the file you just created under /mnt/data and return it as a real clickable Markdown sandbox:/mnt/data link. If it is missing, recreate it once with the exact requested filename and then expose that clickable link.';
           console.warn(`[media-recovery] No downloadable artifact in completed response; requesting one link exposure${createdPath?` for ${createdPath}`:''}`);
-          auditEvents.push('A resposta de mídia terminou sem anexo baixável; foi feita uma única recuperação do link.');
           if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its total media budget before artifact-link recovery');
           const recovered=await runBrowser(slot,exposePrompt,chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:''});
           if(recovered.artifacts?.length) {
@@ -742,20 +753,10 @@ const server = http.createServer(async (req, res) => {
         catch (error) {
           if(artifacts.length && /^main(?:[:]|$)/i.test(callScope)) { remember(); return mediaEnvelope('',raw,artifacts); }
           console.warn('Response format retry:', error.message);
-          auditEvents.push(`A primeira resposta teve formato inválido e foi refeita uma vez: ${error.message}`);
           if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its safety budget before format recovery');
           const retry = await runBrowser(slot,prompt+'\n\nYour previous attempt had this format error: '+error.message+'. Generate the next response again as valid JSON, preserving the latest user task.', chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:nativeMedia?'':expectedArtifact});
           const result=bridge.validateAnswer(retry.raw, requestBody,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
         }
-      });
-      const finalText=finalResponseText(answer);
-      if(finalText!==null) enqueueAudit({
-        contextId:auditContextId,
-        callScope:auditCallScope,
-        question:auditQuestion,
-        response:finalText,
-        events:auditEvents,
-        httpStatus:200,
       });
       if(streamHeartbeat) { clearInterval(streamHeartbeat); streamHeartbeat=null; }
       if (body.stream) return streamResponse(res, answer);
@@ -765,7 +766,7 @@ const server = http.createServer(async (req, res) => {
       // A first request may have created its ChatGPT conversation and then
       // failed while reading the response. Preserve that exact request URL so
       // the next Agent Zero retry cannot open an unrelated new conversation.
-      if(/^main(?:[:]|$)/i.test(auditCallScope)) {
+      if(/^main(?:[:]|$)/i.test(requestCallScope)) {
         const failedChatHash=conversationKey(req);
         const failedChatUrl=requestChatUrlFromError(error);
         if(failedChatHash && failedChatUrl) {

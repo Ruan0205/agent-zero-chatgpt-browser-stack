@@ -98,11 +98,13 @@ services:
       AUDITOR_DISPLAY: ":102"
       BROWSER_POOL_IDLE_MS: "1800000"
       BROWSER_INCIDENTS_DIR: /data/incidents
+      A0_CHATS_DIR: /a0/usr/chats
       AGENT_ZERO_NOTICE_URL: http://agent-zero/api/browser_pool_notice
       AGENT_ZERO_NOTICE_TOKEN: ${BROWSER_POOL_NOTICE_TOKEN:?configure BROWSER_POOL_NOTICE_TOKEN in .env}
     volumes:
       - ${STACK_DATA_DIR:-./data}/browser:/data
       - ${STACK_DATA_DIR:-./data}/browser-workspace:/workspace
+      - ${STACK_DATA_DIR:-./data}/agent-zero/chats:/a0/usr/chats:ro
     working_dir: /workspace
     ports:
       - "${CHATGPT_VNC_PORT:-50081}:6080"

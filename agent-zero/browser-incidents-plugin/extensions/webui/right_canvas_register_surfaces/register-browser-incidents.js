@@ -1,3 +1,46 @@
+import { store as chatsStore } from "/components/sidebar/chats/chats-store.js";
+import { store as chatInputStore } from "/components/chat/input/input-store.js";
+import { store as sidebarStore } from "/components/sidebar/sidebar-store.js";
+import { pruneActivity, sortRowsByActivity } from "/plugins/_browser_incidents/webui/chat-activity-order.mjs";
+
+const ACTIVITY_KEY = "a0:chat-activity-order:v1";
+
+function activityMap() {
+  try { return JSON.parse(localStorage.getItem(ACTIVITY_KEY) || "{}"); }
+  catch { return {}; }
+}
+
+function touchChat(id) {
+  if (!id) return;
+  const activity = pruneActivity(activityMap(), chatsStore.contexts, id);
+  activity[id] = Date.now();
+  localStorage.setItem(ACTIVITY_KEY, JSON.stringify(activity));
+}
+
+function installRecentChatOrdering() {
+  if (globalThis.__a0RecentChatOrderingInstalled) return;
+  globalThis.__a0RecentChatOrderingInstalled = true;
+  sidebarStore.registerRowListExtension("chat", "recent-activity", {
+    sort(rows) {
+      return sortRowsByActivity(rows, chatsStore.contexts, activityMap());
+    },
+  });
+  const originalSelect = chatsStore.selectChat;
+  chatsStore.selectChat = async function recentSelect(id, ...args) {
+    const result = await originalSelect.call(this, id, ...args);
+    touchChat(id);
+    return result;
+  };
+  const originalSend = chatInputStore.sendMessage;
+  chatInputStore.sendMessage = async function recentSend(...args) {
+    touchChat(chatsStore.getSelectedChatId());
+    const result = await originalSend.call(this, ...args);
+    // A first message can create the context inside originalSend.
+    touchChat(chatsStore.getSelectedChatId());
+    return result;
+  };
+}
+
 function waitForElement(selector, timeoutMs = 5000) {
   const found = document.querySelector(selector);
   if (found) return Promise.resolve(found);
@@ -21,7 +64,34 @@ async function api(action = "get", extra = {}) {
     body: JSON.stringify({ action, ...extra }),
   });
   if(!response?.ok) throw new Error(`Auditoria indisponível (${response?.status || 'sem resposta'}).`);
-  return response.json();
+  const result = await response.json();
+  if(result?.success === false) throw new Error(result.error || "A auditoria recusou a solicitação.");
+  return result;
+}
+
+function visible(element) {
+  if (!element) return false;
+  const style = getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+}
+
+function interfaceSnapshot() {
+  const alerts = [...document.querySelectorAll('[role="alert"], .toast, .error, [class*="error"], dialog[open]')]
+    .filter(visible)
+    .map((element) => String(element.innerText || element.textContent || "").trim())
+    .filter(Boolean)
+    .slice(0, 100);
+  return {
+    captured_at: new Date().toISOString(),
+    url: location.href,
+    title: document.title,
+    viewport: { width: innerWidth, height: innerHeight },
+    selected_chat_id: chatsStore.getSelectedChatId(),
+    selected_chat_name: chatsStore.displayName(chatsStore.getSelectedContext()),
+    visible_alerts: alerts,
+    visible_interface_text: String(document.body?.innerText || "").slice(0, 750000),
+  };
 }
 
 function text(element, value) {
@@ -35,16 +105,12 @@ function prettyTime(value) {
 }
 
 function render(root, state) {
-  root.dataset.enabled = state.enabled ? "true" : "false";
-  const toggle = root.querySelector(".incident-toggle");
-  toggle?.setAttribute("aria-checked", String(Boolean(state.enabled)));
-  text(root.querySelector(".incident-toggle-label"), state.enabled ? "Auditoria ligada" : "Auditoria desligada");
   text(root.querySelector("[data-count='open']"), state.counts?.open ?? 0);
   text(root.querySelector("[data-count='total']"), state.counts?.total ?? 0);
   const active = Boolean(state.status?.active);
   const queued = Number(state.status?.queued || 0);
-  text(root.querySelector(".incident-runtime-text"), active ? `Analisando ${state.status?.currentChatName || "interação"}` : queued ? `${queued} na fila` : "Auditor disponível");
-  root.querySelector(".incident-runtime")?.setAttribute("data-state", active ? "busy" : state.enabled ? "ready" : "off");
+  text(root.querySelector(".incident-runtime-text"), active ? `Analisando ${state.status?.currentChatName || "chat"}` : queued ? `${queued} na fila` : "Auditoria manual disponível");
+  root.querySelector(".incident-runtime")?.setAttribute("data-state", active ? "busy" : "ready");
 
   const list = root.querySelector(".incident-list");
   const empty = root.querySelector(".incident-empty");
@@ -94,9 +160,27 @@ async function refresh(root) {
 function wire(root) {
   if (root.dataset.wired === "true") return;
   root.dataset.wired = "true";
-  root.querySelector(".incident-toggle")?.addEventListener("click", async () => {
-    const enabled = root.dataset.enabled !== "true";
-    render(root, await api("set_enabled", { enabled }));
+  root.querySelector(".incident-report-chat")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    const previous = button.textContent;
+    button.textContent = "Enviando para análise…";
+    try {
+      const contextId = chatsStore.getSelectedChatId();
+      if (!contextId) throw new Error("Selecione um chat antes de solicitar o relatório.");
+      const state = await api("report_chat", {
+        context_id: contextId,
+        chat_name: chatsStore.displayName(chatsStore.getSelectedContext()),
+        interface_snapshot: interfaceSnapshot(),
+      });
+      render(root, state);
+    } catch (error) {
+      root.classList.add("has-error");
+      text(root.querySelector(".incident-runtime-text"), error?.message || "Falha ao solicitar relatório");
+    } finally {
+      button.disabled = false;
+      button.textContent = previous;
+    }
   });
   root.querySelector(".incident-refresh")?.addEventListener("click", () => refresh(root));
   root.querySelector(".incident-clear")?.addEventListener("click", async () => render(root, await api("clear_all")));
@@ -105,9 +189,10 @@ function wire(root) {
 let pollTimer = null;
 
 export default async function registerBrowserIncidentsSurface(surfaces) {
+  installRecentChatOrdering();
   surfaces.registerSurface({
     id: "browser-incidents",
-    title: "Auditoria de respostas",
+    title: "Chats com erro",
     icon: "fact_check",
     order: 27,
     modalPath: "/plugins/_browser_incidents/webui/main.html",
