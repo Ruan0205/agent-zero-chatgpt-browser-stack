@@ -35,6 +35,21 @@ def main() -> None:
         bridge_live.mkdir(parents=True)
         (bridge_seed / "plugin.yaml").write_text("version: new\n", encoding="utf-8")
         (bridge_live / "plugin.yaml").write_text("version: old\n", encoding="utf-8")
+        cache = bridge_live / "__pycache__"
+        cache.mkdir()
+        (cache / "stale.pyc").write_bytes(b"obsolete")
+        retired = data / "agent-zero" / "plugins" / "retired_stack_plugin"
+        retired.mkdir(parents=True)
+        (retired / "legacy.txt").write_text("retired\n", encoding="utf-8")
+        operator_file = data / "operator-owned.txt"
+        operator_file.write_text("preserve\n", encoding="utf-8")
+        (seed / "obsolete-paths.json").write_text(
+            json.dumps({
+                "exact_paths": ["agent-zero/plugins/retired_stack_plugin"],
+                "managed_cache_roots": ["agent-zero/plugins/browser_session_bridge"],
+            }),
+            encoding="utf-8",
+        )
 
         model_dir = data / "agent-zero" / "plugins" / "_model_config"
         model_dir.mkdir(parents=True)
@@ -76,6 +91,12 @@ def main() -> None:
         chat_path.write_text(json.dumps(chat), encoding="utf-8")
 
         migration = load_migration(data, seed)
+        try:
+            migration._safe_data_path("../escape")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("path traversal was accepted")
         migration.main()
         migration.main()  # Must remain safe on every container restart.
 
@@ -87,8 +108,18 @@ def main() -> None:
         utility = migrated_chat["data"]["chat_model_override"]["utility"]
         assert utility["name"] == "chatgpt-browser-utility"
         assert utility["api_base"] == "http://chatgpt-browser-utility:8000/v1"
+        assert not retired.exists()
+        assert not cache.exists()
+        assert operator_file.read_text() == "preserve\n"
+        assert (
+            data
+            / ".stack-backups"
+            / "test-schema"
+            / "agent-zero/plugins/retired_stack_plugin/legacy.txt"
+        ).read_text() == "retired\n"
         assert (data / ".stack-backups" / "test-schema").exists()
         marker = json.loads((data / ".stack-migrations" / "test-schema.json").read_text())
+        assert marker["obsolete_removed"] == []
         assert marker["bridge_synced"] is False
         assert marker["presets_migrated"] == 0
         assert marker["browser_chats_migrated"] == 0

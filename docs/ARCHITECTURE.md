@@ -97,7 +97,7 @@ O serviço one-shot `bootstrap` roda antes do Agent Zero. Ele:
 1. cria toda a árvore persistente;
 2. copia settings, presets e contexto apenas se ausentes;
 3. executa `migrate_persistent_state.py`, que sincroniza o bridge de sessão mantido pela
-   stack e migra presets/snapshots antigos com backup atômico e marcador de versão;
+stack e migra presets/snapshots antigos com backup atômico e marcador de versão;
 4. gera `vnc-runtime.json` com senha e porta;
 5. deixa o arquivo acessível apenas ao root do host/container.
 
@@ -105,6 +105,12 @@ As migrações podem rodar novamente sem alterar um estado já atualizado. Os ba
 ficam em `data/.stack-backups/RELEASE` e o resultado da última passagem em
 `data/.stack-migrations/RELEASE.json`. Isso evita que atualizar somente imagens mantenha
 uma cópia antiga do bridge ou do modelo Utility no volume persistente.
+
+Cada release também pode declarar caminhos aposentados em
+`agent-zero/seed/obsolete-paths.json`. Somente esses caminhos exatos e caches sob raízes
+gerenciadas são removidos. A validação impede saída de `STACK_DATA_DIR`, e o conteúdo é
+copiado para o backup da release antes da exclusão. Essa lista explícita evita acumular
+componentes antigos sem transformar a limpeza em um coletor destrutivo de dados do usuário.
 
 O painel noVNC busca esse JSON por uma rota do Agent Zero protegida pelo login e monta a URL de conexão automática. A porta VNC continua exigindo senha para acessos diretos.
 

@@ -3,13 +3,13 @@ name: agent-zero-browser-stack
 services:
   bootstrap:
     build: ./bootstrap
-    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.4}
+    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.5}
     container_name: agent-zero-bootstrap
     restart: "no"
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
       CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
-      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.4}
+      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.5}
     volumes:
       - ./scripts/bootstrap.sh:/bootstrap.sh:ro
       - ./scripts/migrate_persistent_state.py:/migrate_persistent_state.py:ro

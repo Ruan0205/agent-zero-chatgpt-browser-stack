@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.12-stack.5 — limpeza segura de componentes aposentados
+
+- Torna padrão remover arquivos e configurações que deixaram oficialmente de fazer
+  parte da stack.
+- Usa uma lista explícita de caminhos, valida confinamento ao diretório de dados e cria
+  backup antes da remoção; dados desconhecidos e dados do operador são preservados.
+- Remove caches Python de componentes gerenciados e registra tudo no marcador da migração.
+
 ## v2.12-stack.4 — migração confiável de instalações existentes
 
 - Corrige o processo de atualização que mantinha indefinidamente uma cópia antiga do

@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 
-VERSION = os.environ.get("STACK_SCHEMA_VERSION", "v2.12-stack.4")
+VERSION = os.environ.get("STACK_SCHEMA_VERSION", "v2.12-stack.5")
 DATA = Path(os.environ.get("STACK_DATA_ROOT", "/data"))
 SEED = Path(os.environ.get("STACK_SEED_ROOT", "/seed"))
 BACKUP = DATA / ".stack-backups" / VERSION
@@ -85,6 +85,52 @@ def _tree_digest(path: Path) -> str:
         digest.update(str(item.relative_to(path)).encode())
         digest.update(item.read_bytes())
     return digest.hexdigest()
+
+
+def _safe_data_path(relative: str) -> Path:
+    candidate = (DATA / relative).resolve()
+    root = DATA.resolve()
+    if candidate == root or root not in candidate.parents:
+        raise ValueError(f"obsolete path escapes data root: {relative!r}")
+    return candidate
+
+
+def cleanup_obsolete() -> list[str]:
+    """Remove only release-owned paths declared by an audited seed manifest."""
+    manifest_path = SEED / "obsolete-paths.json"
+    if not manifest_path.exists():
+        return []
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    removed: list[str] = []
+    for relative in manifest.get("exact_paths", []):
+        if not isinstance(relative, str) or not relative.strip():
+            continue
+        target = _safe_data_path(relative)
+        if not target.exists() and not target.is_symlink():
+            continue
+        _backup(target)
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+        removed.append(relative)
+
+    for relative in manifest.get("managed_cache_roots", []):
+        if not isinstance(relative, str) or not relative.strip():
+            continue
+        root = _safe_data_path(relative)
+        if not root.is_dir():
+            continue
+        caches = [path for path in root.rglob("__pycache__") if path.is_dir()]
+        bytecode = [path for path in root.rglob("*.pyc") if path.is_file()]
+        for target in bytecode:
+            target.unlink()
+            removed.append(str(target.relative_to(DATA)))
+        for target in sorted(caches, key=lambda path: len(path.parts), reverse=True):
+            if target.exists():
+                shutil.rmtree(target)
+                removed.append(str(target.relative_to(DATA)))
+    return sorted(set(removed))
 
 
 def sync_owned_bridge() -> bool:
@@ -182,6 +228,7 @@ def migrate_legacy_config(path: Path) -> bool:
 def main() -> None:
     results = {
         "version": VERSION,
+        "obsolete_removed": cleanup_obsolete(),
         "bridge_synced": sync_owned_bridge(),
         "presets_migrated": 0,
         "legacy_configs_migrated": 0,

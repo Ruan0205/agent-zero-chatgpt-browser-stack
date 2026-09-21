@@ -1,0 +1,6 @@
+{
+  "exact_paths": [],
+  "managed_cache_roots": [
+    "agent-zero/plugins/browser_session_bridge"
+  ]
+}

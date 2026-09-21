@@ -24,7 +24,8 @@ O repositório contém as customizações funcionais da instalação de origem, 
 - Integração WhatsApp em self-chat, anexos e geração/edição de imagens via Meta AI.
 - Fila Featherless global com concorrência 1, retries e healthcheck.
 - Bootstrap idempotente com migrações versionadas: preserva os dados do operador,
-  atualiza o bridge mantido pela stack e corrige presets/snapshots legados com backup.
+  atualiza o bridge mantido pela stack, corrige presets/snapshots legados e remove
+  componentes aposentados declarados pela release, sempre com backup.
 
 ## Arquitetura
 
@@ -168,6 +169,15 @@ Power. Antes de alterar algo, ela salva a versão anterior em
 `data/.stack-backups/RELEASE/`. O código de `browser_session_bridge` é propriedade da
 stack e é sincronizado com a release; chats, memórias, cookies e credenciais não são
 copiados nem apagados.
+
+### Política de limpeza
+
+Arquivos e configurações que deixarem de fazer parte da stack devem ser incluídos em
+`agent-zero/seed/obsolete-paths.json`. O bootstrap remove esses caminhos durante a
+atualização e guarda a versão anterior no backup da release. A limpeza é deliberadamente
+baseada em uma lista explícita: ela nunca deduz que um arquivo desconhecido é descartável,
+nem remove chats, sessões, credenciais, uploads, workspaces ou configurações personalizadas.
+Caches Python dentro de componentes mantidos pela stack também são descartados.
 
 ## Persistência e privacidade
 
@@ -417,6 +427,8 @@ ATUALIZAÇÃO
    sincronizar `browser_session_bridge`, trocar somente Utility legado Gemma pelo
    `chatgpt-browser-utility` e atualizar a cópia Utility congelada em chats Power, mantendo
    backups em `data/.stack-backups/`. Não aceite apenas o novo container com estado antigo.
+   Remova também todo componente aposentado listado em `obsolete-paths.json`; antes de
+   acrescentar um caminho, prove que ele pertence à stack e não contém dados do operador.
 4. Não reconecte, apague ou regenere sessões. A bridge Meta AI continua opcional e sua tela
    fica em Settings > External, ao lado do WhatsApp.
 
