@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.12-stack.6 — nomes coerentes para chats novos
+
+- Corrige o nome repetido `Greeting`: o gerador ignorava a mensagem sintética `Hello!`
+  criada internamente pelo Agent Zero e a confundia com o primeiro pedido do usuário.
+- A nomeação automática agora usa a primeira solicitação real e continua respeitando
+  renomeações manuais e o modo de nomeação configurado.
+- Adiciona regressão para conversa normal e para o caso em que o próprio usuário escreve
+  `Hello!` como sua mensagem real.
+
 ## v2.12-stack.5 — limpeza segura de componentes aposentados
 
 - Torna padrão remover arquivos e configurações que deixaram oficialmente de fazer

@@ -21,6 +21,8 @@ O repositório contém as customizações funcionais da instalação de origem, 
 - Chromium visível por noVNC e painel integrado no Agent Zero.
 - VS Code/code-server por chat, executor autenticado e acesso ao Docker do host.
 - Proteções contra repetição de respostas e contra memorização que trava o fluxo.
+- Nomes automáticos baseados no primeiro pedido real, ignorando a saudação interna
+  usada para inicializar o histórico do Agent Zero.
 - Integração WhatsApp em self-chat, anexos e geração/edição de imagens via Meta AI.
 - Fila Featherless global com concorrência 1, retries e healthcheck.
 - Bootstrap idempotente com migrações versionadas: preserva os dados do operador,

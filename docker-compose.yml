@@ -3,13 +3,13 @@ name: agent-zero-browser-stack
 services:
   bootstrap:
     build: ./bootstrap
-    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.5}
+    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.6}
     container_name: agent-zero-bootstrap
     restart: "no"
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
       CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
-      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.5}
+      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.6}
     volumes:
       - ./scripts/bootstrap.sh:/bootstrap.sh:ro
       - ./scripts/migrate_persistent_state.py:/migrate_persistent_state.py:ro
@@ -208,6 +208,7 @@ services:
       - ./agent-zero/overrides/_30_repeat_response.py:/a0/extensions/python/message_loop_result/_30_repeat_response.py:ro
       - ./agent-zero/overrides/_90_organize_history_wait.py:/a0/extensions/python/message_loop_prompts_before/_90_organize_history_wait.py:ro
       - ./agent-zero/overrides/_95_bound_large_tool_result.py:/a0/extensions/python/hist_add_tool_result/_95_bound_large_tool_result.py:ro
+      - ./agent-zero/overrides/_60_rename_chat.py:/a0/plugins/_chat_naming/extensions/python/monologue_end/_60_rename_chat.py:ro
       - ./agent-zero/overrides/agent.system.tool.code_exe.md:/a0/plugins/_code_execution/prompts/agent.system.tool.code_exe.md:ro
       - ./agent-zero/overrides/agent.system.solutions.md:/a0/plugins/_memory/prompts/agent.system.solutions.md:ro
       - ./agent-zero/overrides/fw.msg_repeat.md:/a0/prompts/fw.msg_repeat.md:ro
