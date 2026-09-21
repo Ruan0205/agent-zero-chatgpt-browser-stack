@@ -23,7 +23,8 @@ O repositório contém as customizações funcionais da instalação de origem, 
 - Proteções contra repetição de respostas e contra memorização que trava o fluxo.
 - Integração WhatsApp em self-chat, anexos e geração/edição de imagens via Meta AI.
 - Fila Featherless global com concorrência 1, retries e healthcheck.
-- Bootstrap idempotente: configurações iniciais são copiadas apenas se ainda não existirem.
+- Bootstrap idempotente com migrações versionadas: preserva os dados do operador,
+  atualiza o bridge mantido pela stack e corrige presets/snapshots legados com backup.
 
 ## Arquitetura
 
@@ -159,7 +160,14 @@ Os presets ficam em `agent-zero/seed/plugins/_model_config/presets.yaml` e são 
   não são apenas cortados por cabeça/cauda no bridge.
 - **Embedding:** `sentence-transformers/all-MiniLM-L6-v2`.
 
-Depois do primeiro boot, alterações feitas na interface ficam em `data/agent-zero/plugins/_model_config` e não são sobrescritas pelo repositório.
+Depois do primeiro boot, alterações feitas na interface ficam em
+`data/agent-zero/plugins/_model_config` e não são sobrescritas de forma geral. Uma
+migração versionada substitui apenas configurações reconhecidamente legadas da stack
+(por exemplo, Utility `google/gemma-4-E2B-it`) e snapshots Utility congelados de chats
+Power. Antes de alterar algo, ela salva a versão anterior em
+`data/.stack-backups/RELEASE/`. O código de `browser_session_bridge` é propriedade da
+stack e é sincronizado com a release; chats, memórias, cookies e credenciais não são
+copiados nem apagados.
 
 ## Persistência e privacidade
 
@@ -190,6 +198,9 @@ docker compose restart chatgpt-browser-agent
 
 # Recriar após atualizar código
 docker compose up -d --build
+
+# Conferir a migração aplicada nesta instalação
+cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.4}.json"
 
 # Diagnóstico automatizado
 set -a; . ./.env; set +a
@@ -402,6 +413,10 @@ ATUALIZAÇÃO
    `docker compose config --quiet`; construa imagens antes da parada final.
 3. Recrie serviços em ordem de dependência. Aplique migrations idempotentes. Confirme que
    a correção v2.12 que copia arquivos oficiais ausentes para `/a0` permanece funcional.
+   Confirme também a existência de `data/.stack-migrations/*.json`: a migração deve
+   sincronizar `browser_session_bridge`, trocar somente Utility legado Gemma pelo
+   `chatgpt-browser-utility` e atualizar a cópia Utility congelada em chats Power, mantendo
+   backups em `data/.stack-backups/`. Não aceite apenas o novo container com estado antigo.
 4. Não reconecte, apague ou regenere sessões. A bridge Meta AI continua opcional e sua tela
    fica em Settings > External, ao lado do WhatsApp.
 

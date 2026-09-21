@@ -1,5 +1,6 @@
 .env
 data/
+.audit-live/
 *.tar.gz
 *.pyc
 **/__pycache__/

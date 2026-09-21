@@ -45,6 +45,11 @@ if [ ! -e "$data_root/agent-zero/plugins/browser_session_bridge/plugin.yaml" ]; 
   cp -R "$seed_root/plugins/browser_session_bridge/." "$data_root/agent-zero/plugins/browser_session_bridge/"
 fi
 
+# State survives image updates. Apply narrow, versioned migrations so an old
+# bridge, a legacy Gemma Utility preset, or a frozen Power-chat snapshot cannot
+# silently resurrect bugs that were already fixed in the repository.
+python /migrate_persistent_state.py
+
 case "${VNC_PASSWORD:-}" in
   ""|*[!A-Za-z0-9_-]*)
     echo "VNC_PASSWORD deve conter de 1 a 8 caracteres: letras, números, _ ou -." >&2
@@ -63,4 +68,4 @@ printf '{"password":"%s","port":"%s","ports":["%s","%s","%s"]}\n' \
   > "$data_root/agent-monitor/vnc-runtime.json"
 chmod 0600 "$data_root/agent-monitor/vnc-runtime.json"
 
-echo "Bootstrap concluído: dados vazios preparados e configurações padrão instaladas."
+echo "Bootstrap concluído: dados preparados e migrações persistentes aplicadas."

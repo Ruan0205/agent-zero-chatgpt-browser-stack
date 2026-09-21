@@ -1,5 +1,15 @@
 # Changelog
 
+## v2.12-stack.4 — migração confiável de instalações existentes
+
+- Corrige o processo de atualização que mantinha indefinidamente uma cópia antiga do
+  `browser_session_bridge` no volume persistente.
+- Migra seletivamente o antigo Utility `google/gemma-4-E2B-it` para a instância
+  `chatgpt-browser-utility`, inclusive em snapshots congelados de chats Power.
+- Cria backup antes de cada mudança persistente, marcador de migração e verificações
+  no `doctor.sh`.
+- Adiciona regressão que executa a migração duas vezes e comprova idempotência.
+
 ## Em desenvolvimento — três VNCs fixas e auditoria manual
 
 - Três Chromes em displays/noVNC separados; chamadas excedentes ficam em fila, sem escala.
