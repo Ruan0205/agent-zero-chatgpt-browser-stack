@@ -16,7 +16,7 @@ O serviço executa três desktops Xvfb separados (:99, :100 e :101), cada um com
 fluxbox, x11vnc e websockify/noVNC próprios. As telas são publicadas nas portas
 50081, 50083 e 50085 do host. O gateway OpenAI-compatible fica apenas na rede
 Docker, na porta 8000. O auditor usa um quarto display oculto (:102), sem VNC,
-somente quando há resposta final para avaliar.
+somente quando o operador solicita manualmente **Chat com erro**.
 
 O adaptador converte mensagens do Agent Zero em uma instrução compacta para o ChatGPT, exige uma resposta estruturada e a devolve como streaming OpenAI-compatible. O plugin `browser_session_bridge` acrescenta um identificador derivado do chat atual, permitindo uma conversa web independente para cada chat do Agent Zero.
 
@@ -33,10 +33,10 @@ gateway principal quanto pelo Utility; depois de uma rejeição por excesso de
 requisições, qualquer novo envio desses serviços aguarda pelo menos 30 segundos.
 
 O perfil Chrome, cookies, mapa chat↔URL, pool, outbox e incidentes ficam sob
-`data/browser`. O auditor opcional recebe somente envelopes finais `response`
-entregues ao Agent Zero — não chamadas de ferramenta, respostas intermediárias
-nem erros HTTP. Usa uma conversa temporária não listada, evita auditar a si
-próprio e remove a conversa temporária ao terminar.
+`data/browser`. O auditor não é acionado automaticamente a cada prompt. Quando
+o operador clica **Chat com erro**, ele recebe o histórico persistido do chat
+selecionado e um retrato da interface, usa uma conversa temporária não listada
+e remove essa conversa ao terminar. O auditor não dispara auditoria para si mesmo.
 
 ### ChatGPT Browser Utility
 

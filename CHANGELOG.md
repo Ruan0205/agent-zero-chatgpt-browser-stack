@@ -11,6 +11,8 @@
   substituto de um PDF gerado e recebido ponta a ponta.
 - Mantém fora da distribuição um helper local de auditoria sem referências no
   código executado e todas as integrações pessoais desta máquina.
+- Corrige instruções antigas de auditoria e diferencia a documentação upstream
+  isolada da instalação integrada desta stack.
 
 ## v2.12-stack.6 — nomes coerentes para chats novos
 

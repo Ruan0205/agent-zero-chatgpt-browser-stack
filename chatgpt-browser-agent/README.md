@@ -1,5 +1,11 @@
 # chatgpt-browser-agent
 
+> Este arquivo documenta o projeto upstream como ferramenta independente. Para
+> instalar a **stack integrada desta distribuição**, use exclusivamente o
+> [README da raiz](../README.md) e a release suportada ali indicada. Os comandos
+> de clone/login abaixo não configuram o Agent Zero, o Utility, os volumes de
+> mídia nem as VNCs desta stack.
+
 A persistent browser daemon that routes prompts to **chatgpt.com** — no API key required.
 Includes a CLI, an MCP server for coding agents (OpenCode, Claude Desktop, etc.), and a
 Codex-style agentic loop that can explore and edit your codebase autonomously.
