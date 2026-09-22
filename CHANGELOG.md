@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.12-stack.7 — release de instalação reproduzível
+
+- Define esta release como a única recomendada para novas instalações; tags antigas
+  permanecem apenas como histórico e base de rollback.
+- Revisa os prompts de instalação e atualização para verificar commit, estado
+  persistente, segredos e o fluxo real de anexos, inclusive PDF.
+- Amplia o diagnóstico para verificar o bridge, o plugin de mídia, o handler da
+  interface e o outbox compartilhado. Esse diagnóstico não é apresentado como
+  substituto de um PDF gerado e recebido ponta a ponta.
+- Mantém fora da distribuição um helper local de auditoria sem referências no
+  código executado e todas as integrações pessoais desta máquina.
+
 ## v2.12-stack.6 — nomes coerentes para chats novos
 
 - Corrige o nome repetido `Greeting`: o gerador ignorava a mensagem sintética `Hello!`
@@ -27,7 +39,7 @@
   no `doctor.sh`.
 - Adiciona regressão que executa a migração duas vezes e comprova idempotência.
 
-## Em desenvolvimento — três VNCs fixas e auditoria manual
+## v2.12-stack.3 — três VNCs fixas e auditoria manual (histórico)
 
 - Três Chromes em displays/noVNC separados; chamadas excedentes ficam em fila, sem escala.
 - Mantém a afinidade persistente chat Agent Zero ↔ conversa web ↔ display e remapeia
@@ -38,7 +50,7 @@
 - Ordena a barra lateral pela atividade persistida: ao selecionar ou enviar uma
   mensagem, o chat (ou seu grupo pai) passa ao topo.
 
-## Em desenvolvimento — navegador Utility dedicado
+## v2.12-stack.2 — navegador Utility dedicado (histórico)
 
 - Substitui Gemma como modelo auxiliar por uma instância Chrome/noVNC isolada na porta 50084.
 - Usa um único chat auxiliar ativo para chamadas seriadas e envia cada tarefa completa,

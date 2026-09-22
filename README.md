@@ -1,8 +1,10 @@
 # Agent Zero + ChatGPT Browser Stack
 
-Distribuição reproduzível da infraestrutura que integra o **Agent Zero**, um modelo acessado pela interface web do ChatGPT, modelos do Featherless, VS Code no navegador, WhatsApp/Meta AI e ferramentas administrativas do host Linux.
+Distribuição reproduzível da **stack Agent Zero + ChatGPT Browser** desta instalação: modelo acessado pela interface web do ChatGPT, Featherless, VS Code no navegador, WhatsApp/Meta AI e ferramentas administrativas do host Linux.
 
-O repositório contém as customizações funcionais da instalação de origem, mas **não contém** contas Google/ChatGPT, sessões do WhatsApp, chats, memórias, cookies, uploads, chaves de API, senhas ou dados pessoais. Cada instalação começa vazia e exige seus próprios logins.
+**Versão suportada para novas instalações: `v2.12-stack.7`.** A branch `main` aponta para essa release; tags anteriores são histórico/rollback, não alternativas de instalação recomendadas. Instale pelo tag fixo para obter exatamente os arquivos documentados aqui. Não copie o Compose antigo do servidor de origem nem misture arquivos de outras tags.
+
+O repositório contém as customizações funcionais da stack, mas **não contém** contas Google/ChatGPT, sessões do WhatsApp, chats, memórias, cookies, uploads, chaves de API, senhas ou dados pessoais. Cada instalação começa vazia e exige seus próprios logins. Serviços externos à stack (como Nextcloud e projetos pessoais), integrações específicas do Windows do proprietário e dados da máquina original não fazem parte do clone.
 
 > Aviso: esta stack oferece ao Agent Zero acesso `root`, modo privilegiado, PID namespace do host, socket Docker e montagem da raiz Linux em `/host`. Isso equivale a controle administrativo total da máquina quando uma ferramenta é executada. Use somente em servidor dedicado e confiável; leia [SECURITY.md](SECURITY.md) antes de iniciar.
 
@@ -70,13 +72,14 @@ O Chrome é executado no container; não é necessária GPU.
 ## Instalação rápida
 
 ```bash
-git clone https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
+git clone --branch v2.12-stack.7 --depth 1 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
 cd agent-zero-chatgpt-browser-stack
+git describe --tags --exact-match
 chmod +x scripts/*.sh
 ./scripts/setup.sh
 ```
 
-Edite `.env`:
+Edite `.env` (gerado com credenciais internas aleatórias, nunca copie o `.env` da instalação original):
 
 ```bash
 nano .env
@@ -89,14 +92,23 @@ No mínimo, configure:
 - `WA_PHONE`: telefone com DDI e somente dígitos, se for usar Meta AI/WhatsApp.
 - `PUBLIC_HOST` e `PUBLIC_BASE_URL`: IP ou hostname acessível na rede.
 
-Suba toda a stack:
+Confirme que `API_KEY_OTHER` não continua como placeholder, que `STACK_SCHEMA_VERSION=v2.12-stack.7` e que as portas estão livres. No **primeiro boot**, suba a base e o Chrome antes dos serviços que dependem do login:
+
+```bash
+docker compose up -d --build bootstrap featherless-queue meta-ai-whatsapp vscode chatgpt-browser-agent
+docker compose ps
+```
+
+O Chrome ficará no modo de primeiro login; é esperado que o healthcheck do gateway ainda não passe. Siga o passo **Entrar no ChatGPT Browser** abaixo. Depois de autenticar e fechar apenas a janela do Chrome dentro do noVNC, suba os serviços restantes:
 
 ```bash
 docker compose up -d --build
 docker compose ps
+set -a; . ./.env; set +a
+./scripts/doctor.sh
 ```
 
-No primeiro build, Docker baixa o Agent Zero, Node, Chrome, Chromium, noVNC, code-server e dependências Go/Python. Pode levar vários minutos.
+Em instalações já autenticadas, basta `docker compose up -d --build`. No primeiro build, Docker baixa o Agent Zero, Node, Chrome, Chromium, noVNC, code-server e dependências Go/Python. Pode levar vários minutos.
 
 ## Primeiros acessos
 
@@ -121,8 +133,8 @@ o mapa entre chat Agent Zero, conversa web e display; pedidos adicionais aguarda
 2. Entre com `VNC_PASSWORD` se estiver usando o endereço direto.
 3. No Chrome exibido, abra `https://chatgpt.com` e faça login manualmente.
 4. Confirme que a página normal de conversa aparece e então feche a janela do Chrome. No primeiro acesso, esse fechamento encerra o modo de configuração e inicia automaticamente o pool de navegadores.
-5. Aguarde o healthcheck ficar saudável. A instância Utility copiará esse perfil para
-   seu próprio volume, abrirá uma VNC separada e então o Agent Zero terminará de iniciar.
+5. Aguarde o navegador principal ficar saudável e execute o segundo `docker compose up -d --build` acima. A instância Utility copiará esse perfil para seu próprio volume,
+   abrirá uma VNC separada e então o Agent Zero terminará de iniciar.
 
 Os perfis ficam em `data/browser` e `data/browser-utility`. A instância auxiliar usa
 uma cópia isolada do login do navegador principal, não exige outro login e mantém
@@ -212,7 +224,7 @@ docker compose restart chatgpt-browser-agent
 docker compose up -d --build
 
 # Conferir a migração aplicada nesta instalação
-cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.4}.json"
+cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.7}.json"
 
 # Diagnóstico automatizado
 set -a; . ./.env; set +a
@@ -256,6 +268,14 @@ set -a; . ./.env; set +a
 ./scripts/doctor.sh
 ```
 
+`doctor.sh` verifica montagem do plugin de mídia, código do bridge e outbox, mas
+**não comprova que um PDF ou imagem gerado no ChatGPT apareceu na interface do
+Agent Zero**. Para aprovar uma instalação, faça também o teste ponta a ponta no
+mesmo chat: solicite um PDF com marcador único, confirme `%PDF-`, bytes não vazios,
+anexo visível e download funcional; repita com imagem. Se um desses passos falhar,
+inspecione o chat, o gateway, o outbox, o plugin e o handler da interface antes de
+declarar sucesso. O retorno apenas textual “arquivo pronto” não é aprovação.
+
 ## Solução de problemas
 
 ### HTTP 429 / rate limit
@@ -281,7 +301,7 @@ curl http://127.0.0.1:50081/vnc.html
 
 ### Modelo Featherless indisponível
 
-Modelos podem estar cold, fora de deployment ou temporariamente indisponíveis. Troque `DEFAULT_MODEL`/`UTILITY_MODEL` em `.env` e recrie o Agent Zero, ou altere o preset pela interface.
+Modelos podem estar cold, fora de deployment ou temporariamente indisponíveis. Altere o preset Default/Efficiency na interface ou em `data/agent-zero/plugins/_model_config/presets.yaml` com backup. `DEFAULT_MODEL` no `.env` controla o fallback inicial, não reescreve automaticamente os presets persistidos. O Utility desta release é `chatgpt-browser-utility`, não um modelo Featherless.
 
 ### WhatsApp desconectado
 
@@ -299,15 +319,20 @@ Copie o bloco inteiro abaixo para uma IA com terminal no servidor Linux. Ele foi
 
 ```text
 Você é responsável por instalar, configurar, validar e documentar a stack pública
-Ruan0205/agent-zero-chatgpt-browser-stack em um servidor Linux. Trabalhe até que a
-instalação esteja funcional; não considere "containers subiram" como validação suficiente.
+Ruan0205/agent-zero-chatgpt-browser-stack em um servidor Linux. Instale SOMENTE a
+release suportada v2.12-stack.7. Trabalhe até que os testes aplicáveis terminem;
+não considere "containers subiram" como validação suficiente. Não misture versões,
+nem replique Compose, volumes ou scripts de uma instalação anterior.
 
 REGRAS DE SEGURANÇA E ESCOPO
 1. Antes de alterar o host, registre distribuição, kernel, CPU, RAM, swap, discos,
    portas em uso, Docker/Compose, firewall e serviços existentes. Não pare nem remova
    aplicações alheias à stack.
-2. Clone o repositório oficial público. Não reutilize cookies, sessões, chats, bancos,
-   arquivos .env ou credenciais de outra instalação.
+2. Clone `https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git` com
+   `--branch v2.12-stack.7 --depth 1`. Confirme `git describe --tags --exact-match`
+   e anote o SHA do commit. Não reutilize cookies, sessões, chats, bancos, arquivos
+   `.env` ou credenciais de outra instalação. Não exporte integrações pessoais do
+   servidor original; Nextcloud e projetos alheios não fazem parte desta stack.
 3. A stack concede ao Agent Zero root, privileged, PID do host, Docker socket e `/host`.
    Explique isso claramente e confirme que o destino é um servidor dedicado/confiável.
 4. Gere localmente, com CSPRNG, todas as credenciais internas: AUTH_PASSWORD,
@@ -326,26 +351,37 @@ REGRAS DE SEGURANÇA E ESCOPO
 INSTALAÇÃO
 1. Instale/verifique Docker Engine 24+, Compose v2, Git, curl e OpenSSL conforme a
    distribuição. Não use Docker-in-Docker.
-2. Clone o repositório, execute `chmod +x scripts/*.sh` e `./scripts/setup.sh`.
-3. Preencha `.env`, mantendo `STACK_DATA_DIR` em um disco com espaço suficiente e
-   `HOST_ROOT_MOUNT=/` somente após a ciência do proprietário.
-4. Execute `docker compose config --quiet`, depois `docker compose up -d --build`.
-5. Aguarde healthchecks. Investigue/repare qualquer restart, unhealthy, traceback,
-   conflito de porta ou permissão. Valide que um clean recreation do Agent Zero v2.12 não
-   perde os plugins oficiais obrigatórios.
-6. Abra `http://HOST:50081/vnc.html`, entregue o controle ao usuário para autenticar o
-   ChatGPT e nunca exporte o perfil. Confirme que o Chrome permanece logado após recriar o
-   container e que a VNC Utility em `http://HOST:50084/vnc.html` clonou o perfil sem
-   pedir outra senha.
+2. No clone fixado acima, execute `chmod +x scripts/*.sh` e `./scripts/setup.sh`.
+3. Preencha `.env`, mantendo `STACK_SCHEMA_VERSION=v2.12-stack.7` e `STACK_DATA_DIR`
+   em disco com espaço suficiente. Confirme que `API_KEY_OTHER`, IP/DNS e telefone
+   opcional não estão com exemplos. Use `HOST_ROOT_MOUNT=/` somente após ciência do
+   proprietário. Não imprima `.env` em logs/relatório.
+4. Execute `docker compose config --quiet` e os testes locais do bridge indicados no
+   README. No primeiro boot execute `docker compose up -d --build bootstrap
+   featherless-queue meta-ai-whatsapp vscode chatgpt-browser-agent`;
+   o navegador ficará temporariamente unhealthy até o login manual. Não use um
+   Dockerfile ou Compose guardado fora deste tag; confira os bind mounts resolvidos.
+5. Abra `http://HOST:50081/vnc.html` depois da primeira fase, entregue o controle
+   ao usuário para autenticar o ChatGPT e nunca exporte o perfil. Feche apenas
+   a janela inicial do Chrome no noVNC para o gateway iniciar.
+6. Após o login, execute
+   `docker compose up -d --build` para subir Utility e Agent Zero. Aguarde os
+   healthchecks. Investigue/repare qualquer restart, unhealthy persistente, traceback,
+   conflito de porta ou permissão. Rode `./scripts/doctor.sh` após login e valide
+   que uma recriação limpa do Agent Zero v2.12 não perde os plugins oficiais nem
+   `_chatgpt_browser_media`.
+   Confirme que o Chrome permanece logado após recriar o container e que a VNC Utility em
+   `http://HOST:50084/vnc.html` clonou o perfil sem pedir outra senha.
 7. Se Meta AI for desejada, use Agent Zero > Settings > External > Meta AI WhatsApp
    Bridge para gerar o código. A conexão deve ser opcional. Configure separadamente o
    WhatsApp self-chat do Agent Zero e jamais habilite respostas para contatos não
    autorizados.
 
 MATRIZ OBRIGATÓRIA DE TESTES — EXECUTE E GUARDE EVIDÊNCIAS
-A. Infra: compose válido; todos os healthchecks; restart individual; recriação limpa;
-   reboot do host; persistência de configurações; ausência de segredos no Git; portas;
-   uso de CPU/RAM/disco; logs sem boot-loop.
+A. Infra: tag/SHA correto; Compose resolvido e mounts iguais à release; todos os
+   healthchecks; restart individual; recriação limpa; reboot do host; persistência
+   de configurações; ausência de segredos no Git; portas; uso de CPU/RAM/disco;
+   logs sem boot-loop; `doctor.sh` e testes Node/Python do repositório.
 B. Modelos: Default Qwen/Featherless, Efficiency, Utility e Power chatgpt-browser.
    Para cada um: pergunta curta, resposta longa/coesa, português, chamada de ferramenta,
    erro de ferramenta, continuação no mesmo chat e novo chat isolado. Confirme que Qwen
@@ -365,9 +401,13 @@ D. Ferramentas: terminal dentro do container; terminal root no host apenas quand
 E. Imagens: no Power, enviar PNG/JPG/WebP junto do prompt, analisar, gerar uma e várias
    imagens, editar imagem anterior e devolver inline. No Qwen, testar a ferramenta Meta AI
    somente se o usuário a pareou; sem pareamento deve falhar de forma clara e limitada.
+   O ChatGPT Browser não deve desviar uma tarefa de código para geração de imagem.
 F. Saída ChatGPT→Agent Zero, no MESMO chat, um item por vez, validando assinatura real,
-   conteúdo marcador, MIME, tamanho > 0, preview quando aplicável, download e cópia no VS
-   Code antes de avançar. Extensões obrigatórias:
+   conteúdo marcador, MIME, tamanho > 0, anexo na interface, preview quando aplicável,
+   download e cópia no VS Code antes de avançar. No caso PDF, exija cabeçalho `%PDF-`
+   e leitura efetiva do arquivo baixado; não aceite só o texto "arquivo pronto".
+   Verifique a cadeia navegador→gateway→`/data/outbox`→`/a0/usr/browser-media`→
+   ferramenta→handler UI. Extensões obrigatórias:
    png,jpg,jpeg,webp,gif,pdf,docx,xlsx,xls,pptx,csv,tsv,txt,md,json,xml,yaml,yml,
    html,htm,svg,py,js,ts,jsx,tsx,java,c,cpp,h,hpp,cs,go,rs,php,rb,sh,ps1,bat,sql,
    css,toml,ini,cfg,conf,log,ipynb,zip,7z,rar,tar,tar.gz,tgz,gz,bz2,xz,sqlite,
@@ -393,9 +433,13 @@ CRITÉRIO DE APROVAÇÃO
 - Corrija cada defeito na fonte persistente, adicione regressão e repita o caso desde o
   início. Falhas externas (cota/429) devem cumprir retentativas e ser registradas, nunca
   disfarçadas como aprovação.
+- Não confunda teste de montagem/healthcheck com teste ponta a ponta. Registre
+  separadamente resultado backend (arquivo e anexo persistido) e resultado visual
+  (preview/download realmente utilizável pelo usuário).
 - Só declare concluído com relatório PASS/FAIL, hashes/nomes das evidências, versões e
   instruções de acesso. Se algum teste não puder passar, diga exatamente qual, preserve a
-  stack estável e não alegue 100%.
+  stack estável e não alegue 100%. Não afirme que fez os 90 formatos sem registro
+  individual de cada um.
 ```
 
 ## Prompt completo para atualização por outra IA
@@ -403,14 +447,18 @@ CRITÉRIO DE APROVAÇÃO
 Este segundo prompt preserva dados de uma instalação existente e exige rollback se a atualização não puder ser validada.
 
 ```text
-Atualize uma instalação existente de Ruan0205/agent-zero-chatgpt-browser-stack para a
-release pública mais recente sem perder chats, memórias, uploads, workspaces, configurações,
-sessões do ChatGPT/WhatsApp ou credenciais. Você tem autorização para reiniciar apenas os
-serviços desta stack. Não altere aplicações alheias.
+Atualize uma instalação existente de Ruan0205/agent-zero-chatgpt-browser-stack para
+a release pública suportada v2.12-stack.7 sem perder chats, memórias, uploads,
+workspaces, configurações, sessões do ChatGPT/WhatsApp ou credenciais. Esta release
+substitui as antigas para uso normal; tags antigas servem apenas para rollback.
+Você tem autorização para reiniciar apenas os serviços desta stack. Não altere
+aplicações alheias nem copie cegamente arquivos de outra máquina.
 
 CHECKPOINT E INVENTÁRIO — OBRIGATÓRIOS ANTES DA PRIMEIRA MUDANÇA
 1. Identifique diretório do repositório, commit/tag atual, arquivos modificados, imagens e
    digests, Compose resolvido, volumes/mounts, permissões, containers, healthchecks e portas.
+   Classifique cada divergência como código da stack, personalização do usuário ou
+   segredo/dado persistente. Não suponha que `git pull` atualiza o runtime montado.
 2. Pare a stack de forma consistente e crie checkpoint datado de: repositório, `.env`,
    Compose resolvido, `STACK_DATA_DIR`, perfis/sessões, chats, memória e workspaces. Não
    inclua o backup no Git. Gere SHA-256, teste a leitura do archive e registre procedimento
@@ -421,23 +469,28 @@ CHECKPOINT E INVENTÁRIO — OBRIGATÓRIOS ANTES DA PRIMEIRA MUDANÇA
 ATUALIZAÇÃO
 1. Busque tags/releases e notas oficiais. Faça fetch sem apagar alterações. Crie branch de
    atualização e compare migrations, Dockerfiles, plugins, prompts e schema de settings.
-2. Mescle a release pública; mantenha segredos somente no `.env`; execute
+   Fixe `v2.12-stack.7`, registre o SHA e rejeite arquivos misturados de tags antigas.
+2. Mescle a release pública; mantenha segredos somente no `.env`; ajuste
+   `STACK_SCHEMA_VERSION=v2.12-stack.7` sem apagar outros valores; execute
    `docker compose config --quiet`; construa imagens antes da parada final.
 3. Recrie serviços em ordem de dependência. Aplique migrations idempotentes. Confirme que
    a correção v2.12 que copia arquivos oficiais ausentes para `/a0` permanece funcional.
    Confirme também a existência de `data/.stack-migrations/*.json`: a migração deve
    sincronizar `browser_session_bridge`, trocar somente Utility legado Gemma pelo
    `chatgpt-browser-utility` e atualizar a cópia Utility congelada em chats Power, mantendo
-   backups em `data/.stack-backups/`. Não aceite apenas o novo container com estado antigo.
+   backups em `data/.stack-backups/`. Compare os hashes dos arquivos da release
+   com as fontes efetivas dos containers/mounts. Não aceite apenas o novo container
+   com estado antigo nem substitua presets personalizados fora da migração declarada.
    Remova também todo componente aposentado listado em `obsolete-paths.json`; antes de
    acrescentar um caminho, prove que ele pertence à stack e não contém dados do operador.
 4. Não reconecte, apague ou regenere sessões. A bridge Meta AI continua opcional e sua tela
    fica em Settings > External, ao lado do WhatsApp.
 
 MATRIZ OBRIGATÓRIA PÓS-ATUALIZAÇÃO
-A. Infra/persistência: healthchecks, restarts, clean recreation, reboot, versões/digests,
-   logs, CPU/RAM/disco, portas e prova de que chats/memórias/uploads/workspaces/settings e
-   sessões anteriores continuam presentes.
+A. Infra/persistência: tag/SHA, hashes de fonte e runtime, Compose/mounts,
+   `doctor.sh`, testes do repositório, healthchecks, restarts, clean recreation,
+   reboot, versões/digests, logs, CPU/RAM/disco, portas e prova de que chats,
+   memórias, uploads, workspaces, settings e sessões anteriores continuam presentes.
 B. Modelos: Default Qwen/Featherless, Efficiency, Utility e Power chatgpt-browser; pergunta
    curta, longa, português, ferramenta, erro, continuação e chat novo. Sem mistura de
    contextos ou chamada do navegador pelo Qwen como modelo principal. Teste uma chamada
@@ -452,12 +505,14 @@ D. Ferramentas: terminal Agent Zero, host root somente sob pedido, Docker, brows
 E. Imagem: Power recebe/análise PNG/JPG/WebP, gera uma/múltiplas imagens e edita/devolve
    inline; Qwen usa Meta AI somente se pareada e falha claramente se não estiver.
 F. Saída no MESMO chat: peça ao ChatGPT web para gerar uma imagem e confira o preview
-   inline e o download; depois peça separadamente um ZIP, um TXT e um YAML. Valide em
-   cada caso assinatura/formato real, conteúdo marcador, MIME, tamanho > 0, download e
-   cópia para o VS Code. Não é necessário repetir aqui a matriz de 90 extensões da
-   instalação inicial.
-G. Entrada no MESMO chat: envie pela interface/API real uma imagem PNG, um ZIP, um TXT e
-   um YAML válidos, cada qual com marcador exclusivo. Peça ao ChatGPT que identifique o
+   inline e o download; depois peça separadamente PDF, ZIP, TXT e YAML. Valide em
+   cada caso assinatura/formato real, conteúdo marcador, MIME, tamanho > 0, anexo
+   visível, download e cópia para o VS Code. Para PDF, leia o arquivo baixado e
+   comprove `%PDF-`. Confira logs do gateway, outbox, plugin e handler se o ChatGPT
+   disser que criou o arquivo mas ele não aparecer. Não é necessário repetir aqui
+   a matriz inteira de extensões da instalação inicial.
+G. Entrada no MESMO chat: envie pela interface/API real uma imagem PNG, um PDF, um ZIP,
+   um TXT e um YAML válidos, cada qual com marcador exclusivo. Peça ao ChatGPT que identifique o
    conteúdo ou uma propriedade estrutural; confirme upload, leitura e ausência de perda.
    Recomece do zero apenas a unidade que precisar de correção.
 H. WhatsApp opcional: self-chat exclusivo, texto/imagem/documento/áudio, nenhum prefixo,
@@ -474,6 +529,8 @@ ROLLBACK E ENTREGA
 - Se um requisito continuar falhando após diagnóstico razoável, pare a nova versão,
   restaure exatamente o checkpoint, recrie os serviços anteriores e execute smoke tests
   para provar o rollback. Explique o erro, evidências, tentativas e condição para retomar.
+- Não confunda logs de geração, healthcheck ou a frase "arquivo pronto" com
+  visualização/download realmente funcionais na interface do Agent Zero.
 - Só mantenha a atualização quando todos os testes aplicáveis passarem. Entregue relatório
   com versão anterior/nova, hashes, backup/rollback, PASS/FAIL de cada grupo, mudanças
   locais preservadas e pendências externas reais (por exemplo cota temporária do provedor).

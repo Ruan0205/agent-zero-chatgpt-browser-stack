@@ -31,11 +31,25 @@ $compose exec -T chatgpt-browser-agent node -e "fetch('http://127.0.0.1:8000/hea
 $compose exec -T chatgpt-browser-utility node -e "fetch('http://127.0.0.1:8000/health').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log)"
 
 echo "== Migração persistente =="
-marker="${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.6}.json"
+marker="${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.7}.json"
 test -r "$marker" || { echo "ERRO migration marker ausente: $marker" >&2; exit 1; }
 cat "$marker"
 
 echo "== Modelo Utility efetivo =="
 $compose exec -T agent-zero /opt/venv-a0/bin/python -c "import yaml; p='/a0/usr/plugins/_model_config/presets.yaml'; d=yaml.safe_load(open(p)); bad=[x.get('name') for x in d if (x.get('utility') or {}).get('name')!='chatgpt-browser-utility']; assert not bad, f'presets sem Utility browser: {bad}'; print('OK: todos os presets usam chatgpt-browser-utility')"
+
+echo "== Caminho de anexos ChatGPT Browser =="
+$compose exec -T chatgpt-browser-agent sh -c 'test -r /app/gateway.js && test -r /app/chatgpt.js && test -d /data/outbox && test -w /data/outbox'
+$compose exec -T agent-zero sh -c 'test -r /a0/plugins/_chatgpt_browser_media/plugin.yaml && test -r /a0/plugins/_chatgpt_browser_media/tools/chatgpt_browser_media.py && test -r /a0/plugins/_chatgpt_browser_media/extensions/webui/get_tool_message_handler/chatgpt-browser-media-handler.js && test -d /a0/usr/browser-media'
+marker_path=$($compose exec -T chatgpt-browser-agent sh -c 'mktemp /data/outbox/.stack-doctor.XXXXXXXX')
+cleanup_marker() {
+  $compose exec -T chatgpt-browser-agent rm -f "$marker_path" >/dev/null 2>&1 || true
+}
+trap cleanup_marker EXIT HUP INT TERM
+marker_name=${marker_path##*/}
+$compose exec -T agent-zero test -r "/a0/usr/browser-media/$marker_name"
+cleanup_marker
+trap - EXIT HUP INT TERM
+echo "OK: bridge, plugin, frontend e outbox realmente compartilhado (não substitui o teste PDF ponta a ponta)"
 
 echo "Diagnóstico básico concluído."
