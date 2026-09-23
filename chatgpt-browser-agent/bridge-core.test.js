@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {buildPrompt,validateAnswer,attachmentInputs,isAgentTurn,browserActionContext,operationalActionContext,extractedUserText,isCurrentUserMessage}=require('./bridge-core');
+const {buildPrompt,validateAnswer,attachmentInputs,attachmentTurnIdentity,isAgentTurn,browserActionContext,operationalActionContext,extractedUserText,isCurrentUserMessage}=require('./bridge-core');
 const system={role:'system',content:'# Agent Zero System Manual\n## available tools\n### code_execution_tool\nFULL TOOL DOCS'};
 const body=messages=>({messages:[system,...messages]});
 test('large tool output is bounded without discarding real task or tool schema',()=>{
@@ -18,6 +18,12 @@ test('malformed, partial, nested, leaked fields fail closed',()=>{
 });
 test('terminal command passes unchanged, not replaced by inventory',()=>{const s=JSON.stringify({thoughts:[],headline:'read',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',code:'hostname',session:0}});assert.equal(validateAnswer(s,body([])),s);});
 test('terminal command alias is normalized',()=>assert.equal(JSON.parse(validateAnswer(JSON.stringify({thoughts:[],headline:'x',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',command:'hostname'}}),body([]))).tool_args.code,'hostname'));
+test('a descriptive terminal session cannot crash Agent Zero integer parsing',()=>{
+ const make=session=>JSON.parse(validateAnswer(JSON.stringify({thoughts:[],headline:'x',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',session,code:'pwd'}}),body([]))).tool_args.session;
+ assert.equal(make('cleanup-jogo2d'),0);
+ assert.equal(make('4'),4);
+ assert.equal(make(2),2);
+});
 test('fenced JSON preserves terminal quotes and backslashes',()=>{
  const code='printf "%s\\n" "teste com aspas"';
  const raw=JSON.stringify({thoughts:[],headline:'x',tool_name:'code_execution_tool',tool_args:{runtime:'terminal',code}});
@@ -32,6 +38,22 @@ test('image inputs are represented and local media is extracted',()=>{
 test('attachments embedded in Agent Zero Human transcript are extracted',()=>{
  const b=body([{role:'user',content:'Human: {"user_message":"read","attachments":["/a0/usr/uploads/a.pdf","/a0/usr/uploads/b.zip"]}'}]);
  assert.deepEqual(attachmentInputs(b,null,{browserOwnsHistory:true}),['/a0/usr/uploads/a.pdf','/a0/usr/uploads/b.zip']);
+});
+
+test('an old image intervention is not attached to a later text-only order, even with append-only state',()=>{
+ const old={role:'user',content:JSON.stringify({user_intervention:'compare this image',attachments:['/a0/usr/uploads/old.png']})};
+ const current={role:'user',content:JSON.stringify({user_message:'Pare o projeto e feche o Godot no Windows.'})};
+ const b=body([old,current]);
+ const prior={messageHashes:[require('./bridge-core').messageHashes(body([old]))[0]],uploadedAttachments:[]};
+ assert.deepEqual(attachmentInputs(b,prior,{browserOwnsHistory:true}),[]);
+ assert.deepEqual(attachmentInputs(b,null,{browserOwnsHistory:true}),[]);
+});
+
+test('re-attaching the same image in a later human message remains an explicit upload',()=>{
+ const old={role:'user',content:JSON.stringify({user_message:'previous failed image',attachments:['/a0/usr/uploads/retry.png']})};
+ const current={role:'user',content:JSON.stringify({user_message:'Tente esta imagem novamente',attachments:['/a0/usr/uploads/retry.png']})};
+ assert.deepEqual(attachmentInputs(body([old,current]),{messageHashes:[]},{browserOwnsHistory:true}),['/a0/usr/uploads/retry.png']);
+ assert.notEqual(attachmentTurnIdentity(body([old])),attachmentTurnIdentity(body([old,current])));
 });
 
 test('artifacts returned by chatgpt browser media are never reuploaded on the next request',()=>{

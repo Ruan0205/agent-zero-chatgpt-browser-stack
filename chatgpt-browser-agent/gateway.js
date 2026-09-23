@@ -11,6 +11,7 @@ const { IncidentAuditor } = require('./incident-auditor');
 const { ProviderCooldown } = require('./provider-cooldown');
 const { isProviderMessageLimit, retryProviderRejection } = require('./retry-policy');
 const { compactUtilityBody } = require('./utility-compactor');
+const { isImageUploadTimeout, imageUploadFailureAnswer, failedUploadChatUrl, uploadedAttachmentsForTurn } = require('./image-upload');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8000);
 const SCRIPT = process.env.CHATGPT_BROWSER_SCRIPT || path.join(__dirname, 'chatgpt.js');
@@ -409,6 +410,7 @@ async function runBrowser(slot, prompt, chatUrl, options={}) {
         BROWSER_RECOVERY_RELOAD: options.reloadBeforeAttempt ? '1' : '0',
         BROWSER_REQUEST_TIMEOUT_MS: String(timeoutMs),
         BROWSER_EXPECTED_ARTIFACT: options.expectedArtifact || '',
+        A0_CONTEXT_ID: options.contextId || '',
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -666,7 +668,8 @@ const server = http.createServer(async (req, res) => {
         const nativeMedia=isNativeMediaRequest(body) && /^main(?:[:]|$)/i.test(callScope);
         prompt=nativeMedia ? nativeMediaPrompt(body) : bridge.buildPrompt(requestBody,MAX_PROMPT_CHARS,utilityCall ? null : (chatHash ? known : null),utilityCall ? null : transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY,callScope,preserveUtilityContext:UTILITY_SINGLE_CHAT});
         const allAttachmentRefs=/^main(?:[:]|$)/i.test(callScope) ? bridge.attachmentInputs(body,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY}) : [];
-        const alreadyUploaded=new Set(Array.isArray(transportState?.uploadedAttachments)?transportState.uploadedAttachments:[]);
+        const attachmentTurnId=bridge.attachmentTurnIdentity(body);
+        const alreadyUploaded=new Set(uploadedAttachmentsForTurn(transportState,attachmentTurnId));
         const attachmentRefs=allAttachmentRefs.filter(ref=>!alreadyUploaded.has(ref));
         const uploadPaths=resolveAttachmentPaths(attachmentRefs);
         const browserUploadPaths=uploadPaths.filter(filePath=>!BROWSER_UI_UPLOAD_BLOCKED_EXTENSIONS.has(path.extname(filePath).toLowerCase()));
@@ -696,12 +699,32 @@ const server = http.createServer(async (req, res) => {
           deadline:requestDeadline,
           uploadPaths:reloadBeforeAttempt?[]:browserUploadPaths,
           expectedArtifact:nativeMedia?'':expectedArtifact,
+          contextId,
         });
         for(let rateAttempt=0;;rateAttempt++) {
           try {
             browserResult=await runAttempt(rateAttempt>0);
             break;
           } catch(error) {
+            if(isImageUploadTimeout(error)) {
+              // A failed first upload never created a ChatGPT turn. The
+              // slot's global session pointer may belong to another Agent
+              // Zero chat, so never bind this conversation to that pointer.
+              const failedUrl=failedUploadChatUrl(chatUrl,requestChatUrlFromError(error));
+              if(chatHash && failedUrl) {
+                const map=loadChatMap();
+                if(!map[chatHash]) {map[chatHash]=failedUrl;saveChatMap(map);}
+                if(stateFile) {
+                  const next={...(transportState||{}),url:failedUrl,ids:[...known],
+                    // A failed upload was never accepted by ChatGPT. Keep
+                    // previously completed uploads, but permit an explicit
+                    // future user turn to retry this same image.
+                    attachmentTurnId,uploadedAttachments:[...alreadyUploaded]};
+                  saveJsonFile(stateFile,next);
+                }
+              }
+              return JSON.stringify(imageUploadFailureAnswer());
+            }
             if(!retryProviderRejection(error,rateAttempt,PROVIDER_429_RETRIES)) throw error;
             if(!chatUrl) chatUrl=requestChatUrlFromError(error);
             if(!chatUrl) throw new Error('Provider 429 retry refused: the current ChatGPT chat URL is unknown');
@@ -730,6 +753,7 @@ const server = http.createServer(async (req, res) => {
               ids:[...known],
               messageHashes:bridge.messageHashes(body),
               toolsHash:bridge.toolsHash(body),
+              attachmentTurnId,
               uploadedAttachments:[...new Set([...alreadyUploaded,...allAttachmentRefs])],
             }),{mode:0o600});
           }

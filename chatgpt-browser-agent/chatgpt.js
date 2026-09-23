@@ -32,6 +32,7 @@ const readline            = require('readline');
 const { execSync, spawn } = require('child_process');
 const { activeProviderRejection } = require('./provider-rejection');
 const { canCollectCompletedTurn } = require('./completion-state');
+const { imageUploadCount, imageUploadReady, imageUploadTimeoutMs } = require('./image-upload');
 
 const puppeteer = addExtra(puppeteerCore);
 puppeteer.use(StealthPlugin());
@@ -56,6 +57,7 @@ const CHATGPT_URL      = 'https://chatgpt.com';
 const REQUEST_TIMEOUT        = 540_000;
 const MAX_REQUEST_TIMEOUT    = 540_000;
 const RESPONSE_START_TIMEOUT = 130_000;
+const IMAGE_UPLOAD_TIMEOUT_MS = Math.max(1_000,Number(process.env.IMAGE_UPLOAD_TIMEOUT_MS || 180_000));
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
@@ -165,11 +167,94 @@ async function uploadFilesToChatGPT(page, uploadPaths, log) {
 
   // ChatGPT may show a "You've already uploaded this file" warning dialog when
   // the same file has been uploaded recently.  Dismiss it so the flow continues.
-  // ChatGPT no longer exposes every uploaded filename as page text (notably
-  // ZIP/PDF chips), so filename matching produces false 60s timeouts. The
-  // authoritative readiness check is the enabled send button after the prompt
-  // is inserted, performed below by the request flow.
-  log('Files injected; final upload readiness will be verified by the send control.');
+  // An enabled send button does not prove that an image finished uploading.
+  // In a failed upload the preview can stay broken/spinning while the button
+  // looks enabled. Image readiness is checked separately before submission.
+  log('Files injected; image previews will be verified before submission.');
+}
+
+async function notifyImageUpload(contextId, message, log) {
+  const url=process.env.AGENT_ZERO_NOTICE_URL;
+  const token=process.env.AGENT_ZERO_NOTICE_TOKEN;
+  if(!contextId || !url || !token) return;
+  try {
+    const response=await fetch(url,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-Browser-Pool-Token':token},
+      body:JSON.stringify({context_id:contextId,message}),
+      signal:AbortSignal.timeout(3_000),
+    });
+    if(!response.ok) log(`Image upload progress notice failed: HTTP ${response.status}`);
+  } catch(error) { log(`Image upload progress notice failed: ${error.message}`); }
+}
+
+async function imageComposerState(page) {
+  return page.evaluate(() => {
+    const editor=document.querySelector('#prompt-textarea');
+    const scope=editor?.closest('form') || editor?.parentElement?.parentElement?.parentElement;
+    const previews=[...(scope?.querySelectorAll('img')||[])].filter(img=>{
+      const rect=img.getBoundingClientRect();
+      return rect.width>=48 && rect.height>=48;
+    });
+    const pending=[...(scope?.querySelectorAll('[role="progressbar"],[aria-busy="true"],[class*="animate-spin"],[class*="loading-spinner"]')||[])]
+      .filter(el=>{
+        const rect=el.getBoundingClientRect();
+        return rect.width>0 && rect.height>0;
+      });
+    const button=document.querySelector('button[data-testid="send-button"]');
+    return {
+      previewCount:previews.length,
+      loadedCount:previews.filter(img=>img.complete && img.naturalWidth>0).length,
+      pendingCount:pending.length,
+      sendEnabled:Boolean(button && !button.disabled),
+    };
+  });
+}
+
+async function clearFailedImageUpload(page, log) {
+  // Reload only on a failed upload; keep the mapped conversation URL intact.
+  await page.reload({waitUntil:'domcontentloaded',timeout:30_000}).catch(error=>
+    log(`Image cleanup reload failed: ${error.message}`));
+  await page.waitForSelector('#prompt-textarea',{timeout:15_000}).catch(()=>{});
+  await page.evaluate(() => {
+    for(const button of document.querySelectorAll(
+      'button[aria-label^="Remove file"],button[aria-label^="Remove image"],button[aria-label^="Remover arquivo"],button[aria-label^="Remover imagem"]'
+    )) button.click();
+  }).catch(()=>{});
+  if(await page.$('#prompt-textarea')) {
+    await page.focus('#prompt-textarea').catch(()=>{});
+    await page.keyboard.down('Control').catch(()=>{});
+    await page.keyboard.press('a').catch(()=>{});
+    await page.keyboard.up('Control').catch(()=>{});
+    await page.keyboard.press('Backspace').catch(()=>{});
+  }
+  const chars=await page.$eval('#prompt-textarea',el=>String(el.value??el.innerText??'').trim().length).catch(()=>-1);
+  log(`Failed image upload cleared from mapped chat; remaining draft chars=${chars}`);
+}
+
+async function waitForImageUploads(page, count, contextId, deadline, log) {
+  if(!count) return;
+  await notifyImageUpload(contextId,'image_upload_wait',log);
+  log(`Waiting for ${count} image preview(s), up to ${Math.round((deadline-Date.now())/1000)}s`);
+  let stable=0;
+  let lastState=null;
+  while(Date.now()<deadline) {
+    const rejection=await readProviderRejection(page);
+    if(rejection) throw new Error(`ChatGPT rejected the image upload: ${rejection}`);
+    lastState=await imageComposerState(page);
+    stable=imageUploadReady(lastState,count) ? stable+1 : 0;
+    if(stable>=2) {
+      log(`Image preview ready: ${JSON.stringify(lastState)}`);
+      await notifyImageUpload(contextId,'image_upload_done',log);
+      return;
+    }
+    await new Promise(resolve=>setTimeout(resolve,1_000));
+  }
+  log(`Image preview timed out: ${JSON.stringify(lastState)}`);
+  await page.screenshot({path:path.join(STATE_DIR,'submission-failure.png'),fullPage:false}).catch(()=>{});
+  await clearFailedImageUpload(page,log);
+  await notifyImageUpload(contextId,'image_upload_failed',log);
+  throw new Error('IMAGE_UPLOAD_TIMEOUT: a imagem não carregou');
 }
 
 async function collectAssistantArtifacts(page, log, responseTurnId=null) {
@@ -1102,6 +1187,11 @@ async function startDaemonProcess() {
         downloadHtml: [...document.querySelectorAll('button')].filter(b=>(b.getAttribute('aria-label')||b.innerText||'').includes('Download file')).slice(-10).map(b=>b.outerHTML.slice(0,2000)),
       }));
       browserState.activeProviderRejection=await readProviderRejection(page);
+      browserState.composerImageUpload=await imageComposerState(page);
+      browserState.largeImages=await page.evaluate(()=>[...document.querySelectorAll('img')]
+        .filter(img=>{const r=img.getBoundingClientRect();return r.width>=48 && r.height>=48;})
+        .slice(-8).map(img=>({complete:img.complete,width:img.naturalWidth,height:img.naturalHeight,
+          inForm:Boolean(img.closest('form')),testid:img.closest('[data-testid]')?.getAttribute('data-testid')||''})));
       return send(200, { ok: true, browser: browserState });
     }
 
@@ -1127,7 +1217,7 @@ async function startDaemonProcess() {
       req.on('data', chunk => (body += chunk));
       req.on('end', async () => {
         const {
-          fullPrompt, codeOnly, newChat, temporaryChat=false, uploadPath, uploadPaths, chatUrl, expectedArtifact,
+          fullPrompt, codeOnly, newChat, temporaryChat=false, uploadPath, uploadPaths, chatUrl, expectedArtifact, contextId='',
           reloadBeforeAttempt=false, requestTimeoutMs=REQUEST_TIMEOUT,
         } = JSON.parse(body);
         const boundedRequestTimeout=Math.max(
@@ -1256,6 +1346,10 @@ async function startDaemonProcess() {
           if (requestUploads.length) {
             await uploadFilesToChatGPT(page, requestUploads, log);
           }
+          const imageCount=imageUploadCount(requestUploads);
+          const imageUploadDeadline=imageCount
+            ? Math.min(requestDeadline,Date.now()+imageUploadTimeoutMs(imageCount,IMAGE_UPLOAD_TIMEOUT_MS))
+            : 0;
 
           await dismissBlockingOverlays(page, log);
           await fillTextarea(page, promptToSend);
@@ -1277,15 +1371,18 @@ async function startDaemonProcess() {
           // button does nothing, which is what caused the previous silent failures.
           const submitStartPath = new URL(page.url()).pathname;
           if (requestUploads.length) {
-            log('Waiting for send button to become enabled (file upload in progress)...');
-            await page.waitForFunction(
-              () => {
-                const btn = document.querySelector('button[data-testid="send-button"]');
-                return btn && !btn.disabled;
-              },
-              { timeout: 60_000 }
-            );
-            log('Send button is now enabled.');
+            if(imageCount) await waitForImageUploads(page,imageCount,contextId,imageUploadDeadline,log);
+            else {
+              log('Waiting for send button to become enabled (file upload in progress)...');
+              await page.waitForFunction(
+                () => {
+                  const btn = document.querySelector('button[data-testid="send-button"]');
+                  return btn && !btn.disabled;
+                },
+                { timeout: 60_000 }
+              );
+              log('Send button is now enabled.');
+            }
           }
 
           // Track stable turn identity, never the virtualized message count.
@@ -1343,6 +1440,15 @@ async function startDaemonProcess() {
               await dismissBlockingOverlays(page,log);
               await page.focus('#prompt-textarea');
               await page.keyboard.press('Enter');
+              acknowledged=await waitForSubmissionAck();
+            }
+          }
+          if(!acknowledged && imageCount) {
+            const state=await imageComposerState(page);
+            if(!imageUploadReady(state,imageCount)) {
+              log('Image preview became pending after send; waiting for it before one final send attempt');
+              await waitForImageUploads(page,imageCount,contextId,imageUploadDeadline,log);
+              await page.click('button[data-testid="send-button"]');
               acknowledged=await waitForSubmissionAck();
             }
           }
@@ -1701,6 +1807,7 @@ Usage:
     const askBody = {
       fullPrompt, codeOnly: opts.codeOnly, newChat: opts.newChat, temporaryChat:opts.temporaryChat, chatUrl: opts.chatUrl,
       uploadPaths: opts.upload,
+      contextId: process.env.A0_CONTEXT_ID || '',
       reloadBeforeAttempt: process.env.BROWSER_RECOVERY_RELOAD === '1',
       requestTimeoutMs: Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || REQUEST_TIMEOUT),
       expectedArtifact: process.env.BROWSER_EXPECTED_ARTIFACT || '',

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from helpers.extension import Extension
@@ -11,6 +12,7 @@ from helpers.print_style import PrintStyle
 
 STATE_KEY = "_repeated_tool_call_guard"
 MAX_IDENTICAL_TOOL_REPEATS = 2
+MAX_BOUNDED_POLL_REPEATS = 60
 SENSITIVE_KEYS = {"authorization", "cookie", "key", "password", "secret", "token"}
 
 
@@ -46,6 +48,34 @@ def _response_signature(response: str) -> tuple[str, str] | None:
         default=str,
     )
     return canonical, description[:800]
+
+
+def _is_bounded_status_poll(response: str) -> bool:
+    """Allow a finite series of short, read-only checks of a running job."""
+    try:
+        payload = json.loads(response.strip())
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict) or payload.get("tool_name") != "code_execution_tool":
+        return False
+    args = payload.get("tool_args")
+    if not isinstance(args, dict):
+        return False
+    command = args.get("code")
+    if not isinstance(command, str):
+        return False
+    wait = re.search(r"(?:^|[;\n])\s*sleep\s+(\d{1,2})\s*(?:;|\n|$)", command)
+    if not wait or not 1 <= int(wait.group(1)) <= 60:
+        return False
+    if re.search(
+        r"\b(?:rm|mv|cp|kill|pkill|restart|stop|start|write_text|unlink)\b"
+        r"|\bsed\s+-i\b|\bcurl\b[^\n]*\s-X\s+(?:POST|PUT|DELETE)\b",
+        command,
+        re.IGNORECASE,
+    ):
+        return False
+    # A short sleep alone is not progress; require a process/status read as well.
+    return bool(re.search(r"\b(?:ps|cat|stat|test|pgrep)\b", command))
 
 
 def _controlled_fallback(response: str) -> str:
@@ -126,7 +156,16 @@ class RepeatResponse(Extension):
         warning = self.agent.read_prompt("fw.msg_repeat.md")
         log_item = self.agent.loop_data.params_temporary.get("log_item_generating")
         stuck = current[1] if current is not None else "identical textual response"
-        if consecutive < MAX_IDENTICAL_TOOL_REPEATS:
+        max_repeats = (
+            MAX_BOUNDED_POLL_REPEATS
+            if current is not None and _is_bounded_status_poll(response)
+            else MAX_IDENTICAL_TOOL_REPEATS
+        )
+        if consecutive < max_repeats:
+            if max_repeats == MAX_BOUNDED_POLL_REPEATS:
+                # Let the poll run. Its tool result may change as the job finishes;
+                # the finite cap still prevents a permanently stuck wait loop.
+                return
             protocol = getattr(self.agent.loop_data, "protocol_temporary", None)
             if isinstance(protocol, dict):
                 protocol["repeat_guard"] = (
@@ -155,6 +194,6 @@ class RepeatResponse(Extension):
             type="warning",
             content=(
                 f"{self.agent.agent_name}: repeated action converted to a controlled "
-                f"response after {MAX_IDENTICAL_TOOL_REPEATS} attempts: {stuck}"
+                f"response after {max_repeats} attempts: {stuck}"
             )
         )

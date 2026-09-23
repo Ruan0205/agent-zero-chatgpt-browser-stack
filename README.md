@@ -2,7 +2,7 @@
 
 Distribuição reproduzível da **stack Agent Zero + ChatGPT Browser** desta instalação: modelo acessado pela interface web do ChatGPT, Featherless, VS Code no navegador, WhatsApp/Meta AI e ferramentas administrativas do host Linux.
 
-**Versão suportada para novas instalações: `v2.12-stack.7`.** A branch `main` aponta para essa release; tags anteriores são histórico/rollback, não alternativas de instalação recomendadas. Instale pelo tag fixo para obter exatamente os arquivos documentados aqui. Não copie o Compose antigo do servidor de origem nem misture arquivos de outras tags.
+**Versão suportada para novas instalações: `v2.12-stack.8`.** A branch `main` aponta para essa release; tags anteriores são histórico/rollback, não alternativas de instalação recomendadas. Instale pelo tag fixo para obter exatamente os arquivos documentados aqui. Não copie o Compose antigo do servidor de origem nem misture arquivos de outras tags.
 
 O repositório contém as customizações funcionais da stack, mas **não contém** contas Google/ChatGPT, sessões do WhatsApp, chats, memórias, cookies, uploads, chaves de API, senhas ou dados pessoais. Cada instalação começa vazia e exige seus próprios logins. Serviços externos à stack (como Nextcloud e projetos pessoais), integrações específicas do Windows do proprietário e dados da máquina original não fazem parte do clone.
 
@@ -16,6 +16,12 @@ O repositório contém as customizações funcionais da stack, mas **não conté
 - Modelo **Utility** `chatgpt-browser-utility` em uma VNC separada; o próprio ChatGPT
   condensa semanticamente históricos grandes antes da resposta auxiliar.
 - Uma conversa do navegador por chat do Agent Zero, evitando misturar contextos.
+- Anexos vinculados apenas à mensagem humana atual: uma imagem antiga não é
+  reenviada com uma ordem posterior de texto. O mesmo arquivo pode ser anexado
+  novamente em outra mensagem quando solicitado explicitamente.
+- Prévia de imagem travada é aguardada por até três minutos por imagem; durante
+  a espera há progresso visível, e uma falha limpa imagem e rascunho e retorna
+  `a imagem não carregou`, sem reenviar a ordem em loop.
 - Envio enxuto ao navegador, reutilizando o contexto mantido pelo próprio ChatGPT.
 - Três Chromes simultâneos, cada um em seu próprio display/noVNC; a quarta chamada aguarda numa fila, sem criar outro navegador.
 - Após "too many requests", todas as novas submissões desse gateway aguardam pelo menos 30 segundos; há até duas retentativas no mesmo chat.
@@ -72,7 +78,7 @@ O Chrome é executado no container; não é necessária GPU.
 ## Instalação rápida
 
 ```bash
-git clone --branch v2.12-stack.7 --depth 1 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
+git clone --branch v2.12-stack.8 --depth 1 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
 cd agent-zero-chatgpt-browser-stack
 git describe --tags --exact-match
 chmod +x scripts/*.sh
@@ -92,7 +98,7 @@ No mínimo, configure:
 - `WA_PHONE`: telefone com DDI e somente dígitos, se for usar Meta AI/WhatsApp.
 - `PUBLIC_HOST` e `PUBLIC_BASE_URL`: IP ou hostname acessível na rede.
 
-Confirme que `API_KEY_OTHER` não continua como placeholder, que `STACK_SCHEMA_VERSION=v2.12-stack.7` e que as portas estão livres. No **primeiro boot**, suba a base e o Chrome antes dos serviços que dependem do login:
+Confirme que `API_KEY_OTHER` não continua como placeholder, que `STACK_SCHEMA_VERSION=v2.12-stack.8` e que as portas estão livres. No **primeiro boot**, suba a base e o Chrome antes dos serviços que dependem do login:
 
 ```bash
 docker compose up -d --build bootstrap featherless-queue meta-ai-whatsapp vscode chatgpt-browser-agent
@@ -224,7 +230,7 @@ docker compose restart chatgpt-browser-agent
 docker compose up -d --build
 
 # Conferir a migração aplicada nesta instalação
-cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.7}.json"
+cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.8}.json"
 
 # Diagnóstico automatizado
 set -a; . ./.env; set +a
@@ -258,7 +264,7 @@ docker compose config --quiet
 
 # Testes do protocolo/bridge ChatGPT Browser
 docker run --rm -v "$PWD/chatgpt-browser-agent:/app" -w /app node:22-bookworm-slim \
-  node --test bridge-core.test.js
+  node --test *.test.js
 
 # Smoke test isolado das quatro imagens construídas
 ./scripts/validate-images.sh
@@ -275,6 +281,9 @@ mesmo chat: solicite um PDF com marcador único, confirme `%PDF-`, bytes não va
 anexo visível e download funcional; repita com imagem. Se um desses passos falhar,
 inspecione o chat, o gateway, o outbox, o plugin e o handler da interface antes de
 declarar sucesso. O retorno apenas textual “arquivo pronto” não é aprovação.
+No mesmo chat, teste também a sequência **imagem que não carrega → resposta de
+falha → nova ordem só de texto**: a chamada final deve ter `attachments=0`,
+usar a mesma conversa no navegador e executar a ordem sem tentar a imagem antiga.
 
 ## Solução de problemas
 
@@ -320,7 +329,7 @@ Copie o bloco inteiro abaixo para uma IA com terminal no servidor Linux. Ele foi
 ```text
 Você é responsável por instalar, configurar, validar e documentar a stack pública
 Ruan0205/agent-zero-chatgpt-browser-stack em um servidor Linux. Instale SOMENTE a
-release suportada v2.12-stack.7. Trabalhe até que os testes aplicáveis terminem;
+release suportada v2.12-stack.8. Trabalhe até que os testes aplicáveis terminem;
 não considere "containers subiram" como validação suficiente. Não misture versões,
 nem replique Compose, volumes ou scripts de uma instalação anterior.
 
@@ -329,7 +338,7 @@ REGRAS DE SEGURANÇA E ESCOPO
    portas em uso, Docker/Compose, firewall e serviços existentes. Não pare nem remova
    aplicações alheias à stack.
 2. Clone `https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git` com
-   `--branch v2.12-stack.7 --depth 1`. Confirme `git describe --tags --exact-match`
+   `--branch v2.12-stack.8 --depth 1`. Confirme `git describe --tags --exact-match`
    e anote o SHA do commit. Não reutilize cookies, sessões, chats, bancos, arquivos
    `.env` ou credenciais de outra instalação. Não exporte integrações pessoais do
    servidor original; Nextcloud e projetos alheios não fazem parte desta stack.
@@ -352,7 +361,7 @@ INSTALAÇÃO
 1. Instale/verifique Docker Engine 24+, Compose v2, Git, curl e OpenSSL conforme a
    distribuição. Não use Docker-in-Docker.
 2. No clone fixado acima, execute `chmod +x scripts/*.sh` e `./scripts/setup.sh`.
-3. Preencha `.env`, mantendo `STACK_SCHEMA_VERSION=v2.12-stack.7` e `STACK_DATA_DIR`
+3. Preencha `.env`, mantendo `STACK_SCHEMA_VERSION=v2.12-stack.8` e `STACK_DATA_DIR`
    em disco com espaço suficiente. Confirme que `API_KEY_OTHER`, IP/DNS e telefone
    opcional não estão com exemplos. Use `HOST_ROOT_MOUNT=/` somente após ciência do
    proprietário. Não imprima `.env` em logs/relatório.
@@ -402,6 +411,10 @@ E. Imagens: no Power, enviar PNG/JPG/WebP junto do prompt, analisar, gerar uma e
    imagens, editar imagem anterior e devolver inline. No Qwen, testar a ferramenta Meta AI
    somente se o usuário a pareou; sem pareamento deve falhar de forma clara e limitada.
    O ChatGPT Browser não deve desviar uma tarefa de código para geração de imagem.
+   Simule uma prévia de imagem travada: confirme progresso visível, espera de até três
+   minutos por imagem, limpeza do rascunho e resposta de falha sem reenvio. Depois,
+   no mesmo chat, envie uma ordem só de texto e confirme `attachments=0` e o mesmo
+   vínculo de conversa. Reanexar explicitamente a imagem deve permitir nova tentativa.
 F. Saída ChatGPT→Agent Zero, no MESMO chat, um item por vez, validando assinatura real,
    conteúdo marcador, MIME, tamanho > 0, anexo na interface, preview quando aplicável,
    download e cópia no VS Code antes de avançar. No caso PDF, exija cabeçalho `%PDF-`
@@ -448,7 +461,7 @@ Este segundo prompt preserva dados de uma instalação existente e exige rollbac
 
 ```text
 Atualize uma instalação existente de Ruan0205/agent-zero-chatgpt-browser-stack para
-a release pública suportada v2.12-stack.7 sem perder chats, memórias, uploads,
+a release pública suportada v2.12-stack.8 sem perder chats, memórias, uploads,
 workspaces, configurações, sessões do ChatGPT/WhatsApp ou credenciais. Esta release
 substitui as antigas para uso normal; tags antigas servem apenas para rollback.
 Você tem autorização para reiniciar apenas os serviços desta stack. Não altere
@@ -469,9 +482,9 @@ CHECKPOINT E INVENTÁRIO — OBRIGATÓRIOS ANTES DA PRIMEIRA MUDANÇA
 ATUALIZAÇÃO
 1. Busque tags/releases e notas oficiais. Faça fetch sem apagar alterações. Crie branch de
    atualização e compare migrations, Dockerfiles, plugins, prompts e schema de settings.
-   Fixe `v2.12-stack.7`, registre o SHA e rejeite arquivos misturados de tags antigas.
+   Fixe `v2.12-stack.8`, registre o SHA e rejeite arquivos misturados de tags antigas.
 2. Mescle a release pública; mantenha segredos somente no `.env`; ajuste
-   `STACK_SCHEMA_VERSION=v2.12-stack.7` sem apagar outros valores; execute
+   `STACK_SCHEMA_VERSION=v2.12-stack.8` sem apagar outros valores; execute
    `docker compose config --quiet`; construa imagens antes da parada final.
 3. Recrie serviços em ordem de dependência. Aplique migrations idempotentes. Confirme que
    a correção v2.12 que copia arquivos oficiais ausentes para `/a0` permanece funcional.
@@ -504,6 +517,9 @@ D. Ferramentas: terminal Agent Zero, host root somente sob pedido, Docker, brows
    VNC, downloads, painel/auditoria de incidentes e limpeza do projeto de teste.
 E. Imagem: Power recebe/análise PNG/JPG/WebP, gera uma/múltiplas imagens e edita/devolve
    inline; Qwen usa Meta AI somente se pareada e falha claramente se não estiver.
+   Confirme também que uma imagem travada não é reenviada com a próxima ordem de texto:
+   progresso, timeout, rascunho limpo, `attachments=0` na ordem seguinte e vínculo
+   Agent Zero ↔ chat do navegador inalterado. Um reenvio explícito deve continuar possível.
 F. Saída no MESMO chat: peça ao ChatGPT web para gerar uma imagem e confira o preview
    inline e o download; depois peça separadamente PDF, ZIP, TXT e YAML. Valide em
    cada caso assinatura/formato real, conteúdo marcador, MIME, tamanho > 0, anexo

@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.12-stack.8 — anexos por mensagem e upload de imagem com prazo
+
+- Mantém um chat do navegador por chat do Agent Zero e limita anexos à mensagem
+  humana atual; uma imagem antiga não acompanha uma nova ordem só de texto.
+- Registra uploads concluídos por mensagem, não globalmente pelo caminho do arquivo;
+  uma nova anexação explícita do mesmo arquivo continua possível.
+- Aguarda a prévia de cada imagem por até três minutos, mostra progresso no Agent Zero
+  e, se travar, remove anexo e rascunho e responde `a imagem não carregou` sem loop.
+- Evita associar uma primeira tentativa de upload malsucedida ao chat de outra
+  instância do navegador.
+- Normaliza sessões de terminal não numéricas antes que cheguem ao Agent Zero e
+  permite uma série finita de verificações curtas de processos em andamento.
+- Amplia os testes de regressão e a matriz de instalação/atualização para cobrir
+  a sequência imagem travada → nova ordem de texto no mesmo chat.
+
 ## v2.12-stack.7 — release de instalação reproduzível
 
 - Define esta release como a única recomendada para novas instalações; tags antigas

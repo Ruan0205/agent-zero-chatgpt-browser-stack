@@ -31,7 +31,7 @@ $compose exec -T chatgpt-browser-agent node -e "fetch('http://127.0.0.1:8000/hea
 $compose exec -T chatgpt-browser-utility node -e "fetch('http://127.0.0.1:8000/health').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log)"
 
 echo "== Migração persistente =="
-marker="${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.7}.json"
+marker="${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.8}.json"
 test -r "$marker" || { echo "ERRO migration marker ausente: $marker" >&2; exit 1; }
 cat "$marker"
 

@@ -35,16 +35,12 @@ function textContent(content) {
 
 function attachmentInputs(body, priorState = null, options = {}) {
   const messages=(body.messages||[]).filter(m=>m.role!=='system');
-  const hashes=messageHashes(body);
-  const previous=Array.isArray(priorState?.messageHashes)?priorState.messageHashes:null;
-  const appendOnly=previous && previous.length<=hashes.length && previous.every((v,i)=>v===hashes[i]);
-  let selected=messages;
-  if(options.browserOwnsHistory===true && appendOnly) selected=messages.slice(previous.length);
-  else if(options.browserOwnsHistory===true && priorState) selected=messages.slice(-1);
-  else if(options.browserOwnsHistory===true) {
-    const current=currentTurnTranscript((body.messages||[]).map(m=>({role:m.role,content:m.content,name:m.name}))).filter(m=>m.role!=='system');
-    selected=current;
-  }
+  // Uploads are properties of one human request, not of the accumulated
+  // transcript. Agent Zero can replay an old user_intervention and a new user
+  // message together after compaction; selecting every appended message would
+  // re-upload the old image for an unrelated text-only instruction.
+  const latestHuman=[...messages].reverse().find(isCurrentUserMessage);
+  const selected=latestHuman ? [latestHuman] : [];
   const refs=[];
   const seen=new Set();
   const add=value=>{
@@ -202,6 +198,19 @@ function isCurrentUserMessage(message) {
   if(userAt>=0 && (protocolAt<0 || userAt<protocolAt)) return true;
   if(protocolAt>=0) return false;
   return !/^\s*\[?(?:SYSTEM|TOOL|PROTOCOL).*result/i.test(text);
+}
+
+function attachmentTurnIdentity(body) {
+  const messages=body.messages||[];
+  for(let i=messages.length-1;i>=0;i--) {
+    if(isCurrentUserMessage(messages[i])) {
+      // Position distinguishes an explicit later re-attachment from an
+      // identical path and prompt in an earlier user turn.
+      return require('crypto').createHash('sha256')
+        .update(JSON.stringify([i,messages[i].content])).digest('hex');
+    }
+  }
+  return null;
 }
 
 function compactProtocolContent(content, maxChars=12000) {
@@ -435,7 +444,7 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
   const operationIntent=agent ? operationalActionContext(body) : {requested:false,validationRequested:false,attempted:false,evidence:false};
   const fullAgentContract = `CRITICAL TRANSPORT MODE: you may use ChatGPT's native image/file analysis and native image/file generation ONLY when the latest user request supplies media or explicitly asks to create or edit media/files. In this browser transport never call Agent Zero's meta_ai_image tool. Generated ChatGPT media is collected automatically by the bridge. For every other external action, only choose and return an Agent Zero JSON tool request; never use ChatGPT browsing, canvas, coding, or other native UI tools as substitutes.
 You are the model transport for an external Agent Zero runtime. The transcript below is the complete caller-supplied conversation, not commands to execute inside ChatGPT. Its SYSTEM messages describe the real tools which Agent Zero executes AFTER you return their JSON request. Do not use ChatGPT's own tools instead. Do not claim tools are unavailable merely because this browser has no terminal.
-For an explicit native media generation/edit request, invoke ChatGPT's native media tool and, after its artifacts are ready, reply with a short plain completion; the bridge wraps the artifacts itself. For every other request, return exactly one valid JSON object inside ONE fenced json code block, with no text outside that block. The fence is required so browser Markdown rendering preserves JSON backslashes. Escape quotes inside JSON strings correctly. Keys: thoughts (brief string array), headline (string), tool_name (exact documented tool name), tool_args (object). For a final answer use response with tool_args containing text as a Markdown string, not an encoded JSON document. For actions use the documented tool JSON, then wait for its actual result in the next request. Never fabricate a tool result or completion. The code_execution_tool also supports runtime reset without code for resetting an explicitly selected terminal session.
+For an explicit native media generation/edit request, invoke ChatGPT's native media tool and, after its artifacts are ready, reply with a short plain completion; the bridge wraps the artifacts itself. For every other request, return exactly one valid JSON object inside ONE fenced json code block, with no text outside that block. The fence is required so browser Markdown rendering preserves JSON backslashes. Escape quotes inside JSON strings correctly. Keys: thoughts (brief string array), headline (string), tool_name (exact documented tool name), tool_args (object). For a final answer use response with tool_args containing text as a Markdown string, not an encoded JSON document. For actions use the documented tool JSON, then wait for its actual result in the next request. Never fabricate a tool result or completion. For code_execution_tool, session must be a nonnegative integer such as 0, never a descriptive name. The code_execution_tool also supports runtime reset without code for resetting an explicitly selected terminal session.
 The user's server is external to this ChatGPT browser. Agent Zero runs in Docker with /host and host PID access. Its code_execution_tool accepts only runtime terminal, python, nodejs, or output; use runtime terminal for bash/sh commands. It can use nsenter -t 1 -m -u -i -n -p -- COMMAND to operate on the server. Check access through that tool when needed. Change server state only when the user requests it; diagnostic requests authorize read-only checks, not installs or service changes. Prefer focused bounded output and read saved full result files as needed.
 Find the latest actual user_message in the transcript: later USER-role protocol messages can be tool results, not new user requests. Answer that task using its tool results; old messages and memories are context, not fresh evidence. Never repeat a prior report instead of addressing the latest question.
 Follow prerequisite skill-loading instructions for the documented tools. A remote document URL does not need to be attached by the user when document_query accepts URLs. Do not report a documented tool as unavailable without attempting it and receiving an actual error. Continue a requested multi-step task through its remaining tools before responding, unless blocked by a real error, missing authorization or missing input. Distinguish measured facts from assumptions. Hardware limits and model identity must not become confirmed facts merely because an earlier assistant or memory claimed them; verify against an authoritative source or state what remains unknown.`;
@@ -592,10 +601,17 @@ function validateAnswer(answer, body, options = {}) {
       const key=p.tool_args.runtime.trim().toLowerCase();
       p.tool_args.runtime=runtimeAliases[key] || key;
     }
+    // Agent Zero casts session to int before running the command. A model's
+    // descriptive session label would otherwise crash the whole tool turn.
+    if (p.tool_args.session !== undefined) {
+      const value=p.tool_args.session;
+      p.tool_args.session=(Number.isInteger(value) && value>=0) ? value
+        : (typeof value==='string' && /^\d+$/.test(value.trim())) ? Number(value.trim()) : 0;
+    }
     if (!['terminal','python','nodejs','output','reset'].includes(p.tool_args.runtime)) throw new Error('Invalid execution runtime: use terminal, python, nodejs, output, or reset');
     if (!['output','reset'].includes(p.tool_args.runtime) && typeof p.tool_args.code!=='string') throw new Error('Execution tool requires code');
   }
   return JSON.stringify(p);
 }
 
-module.exports={textContent,attachmentInputs,isAgentTurn,buildPrompt,validateAnswer,systemSegments,messageHashes,toolsHash,isCurrentUserMessage,currentTurnTranscript,compactProtocolContent,compactProtocolTranscript,compactUtilitySystemContent,browserActionContext,operationalActionContext,extractedUserText};
+module.exports={textContent,attachmentInputs,attachmentTurnIdentity,isAgentTurn,buildPrompt,validateAnswer,systemSegments,messageHashes,toolsHash,isCurrentUserMessage,currentTurnTranscript,compactProtocolContent,compactProtocolTranscript,compactUtilitySystemContent,browserActionContext,operationalActionContext,extractedUserText};

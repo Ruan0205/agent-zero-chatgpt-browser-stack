@@ -29,12 +29,25 @@ class BrowserPoolNotice(ApiHandler):
         message = str(input.get("message", "")).strip()
         if not context_id:
             return Response('{"error":"context_id is required"}', status=400, mimetype="application/json")
-        if message != "subindo uma nova instancia de navegador":
+        allowed = {
+            "subindo uma nova instancia de navegador",
+            "image_upload_wait",
+            "image_upload_done",
+            "image_upload_failed",
+        }
+        if message not in allowed:
             return Response('{"error":"invalid message"}', status=400, mimetype="application/json")
 
         context = self.use_context(context_id, create_if_not_exists=False)
         if not context:
             return Response('{"error":"context not found"}', status=404, mimetype="application/json")
 
-        context.log.log(type="info", heading="Browser pool", content=message)
+        if message == "image_upload_wait":
+            context.log.set_progress("esperando a imagem carregar no navegador remoto")
+        elif message == "image_upload_done":
+            context.log.set_progress("A0: Calling LLM...")
+        elif message == "image_upload_failed":
+            context.log.set_progress("a imagem não carregou", active=False)
+        else:
+            context.log.log(type="info", heading="Browser pool", content=message)
         return {"ok": True, "context_id": context_id}
