@@ -204,10 +204,17 @@ function attachmentTurnIdentity(body) {
   const messages=body.messages||[];
   for(let i=messages.length-1;i>=0;i--) {
     if(isCurrentUserMessage(messages[i])) {
-      // Position distinguishes an explicit later re-attachment from an
-      // identical path and prompt in an earlier user turn.
+      // Assistant/tool messages can be inserted before the same human turn
+      // during Agent Zero's round trips. Their insertion must not make an
+      // already submitted image look like a new upload request.
+      const content=JSON.stringify(messages[i].content);
+      let occurrence=0;
+      for(let j=0;j<=i;j++) {
+        if(isCurrentUserMessage(messages[j]) && JSON.stringify(messages[j].content)===content)
+          occurrence++;
+      }
       return require('crypto').createHash('sha256')
-        .update(JSON.stringify([i,messages[i].content])).digest('hex');
+        .update(JSON.stringify([content,occurrence])).digest('hex');
     }
   }
   return null;

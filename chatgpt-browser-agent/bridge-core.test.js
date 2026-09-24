@@ -72,6 +72,21 @@ test('attachments embedded in Agent Zero Human transcript are extracted',()=>{
  assert.deepEqual(attachmentInputs(b,null,{browserOwnsHistory:true}),['/a0/usr/uploads/a.pdf','/a0/usr/uploads/b.zip']);
 });
 
+test('tool round-trip retains the upload identity of the same human request',()=>{
+ const human={role:'user',content:JSON.stringify({user_message:'Use estas imagens no projeto',attachments:['/a0/usr/uploads/one.png','/a0/usr/uploads/two.png']})};
+ const initial=body([human]);
+ const afterTool=body([human,
+  {role:'assistant',content:'{"tool_name":"vscode","tool_args":{}}'},
+  {role:'user',content:'{"tool_result":"Workspace pronto"}'}]);
+ assert.equal(attachmentTurnIdentity(initial),attachmentTurnIdentity(afterTool));
+ assert.deepEqual(attachmentInputs(afterTool),attachmentInputs(initial));
+});
+
+test('explicit repeated human request remains a separate upload turn',()=>{
+ const human={role:'user',content:JSON.stringify({user_message:'Use esta imagem',attachments:['/a0/usr/uploads/one.png']})};
+ assert.notEqual(attachmentTurnIdentity(body([human])),attachmentTurnIdentity(body([human,{role:'assistant',content:'done'},human])));
+});
+
 test('an old image intervention is not attached to a later text-only order, even with append-only state',()=>{
  const old={role:'user',content:JSON.stringify({user_intervention:'compare this image',attachments:['/a0/usr/uploads/old.png']})};
  const current={role:'user',content:JSON.stringify({user_message:'Pare o projeto e feche o Godot no Windows.'})};

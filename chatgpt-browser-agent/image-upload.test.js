@@ -3,6 +3,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {imageUploadCount,imageUploadReady,imageUploadTimeoutMs,isImageUploadTimeout,imageUploadFailureAnswer,failedUploadChatUrl,uploadedAttachmentsForTurn}=require('./image-upload');
+const {attachmentInputs,attachmentTurnIdentity}=require('./bridge-core');
 
 test('only image attachments receive the image-specific wait',()=>{
   assert.equal(imageUploadCount(['/tmp/a.png','/tmp/b.JPG','/tmp/c.pdf']),2);
@@ -40,4 +41,27 @@ test('completed uploads are remembered only within their own human message',()=>
   assert.deepEqual(uploadedAttachmentsForTurn(state,'message-1'),['/a0/usr/uploads/a.png']);
   assert.deepEqual(uploadedAttachmentsForTurn(state,'message-2'),[]);
   assert.deepEqual(uploadedAttachmentsForTurn({uploadedAttachments:state.uploadedAttachments},'message-2'),[]);
+});
+
+test('legacy position-based upload records migrate only for the same prior user message',()=>{
+  const message={role:'user',content:'{"user_message":"Analyze","attachments":["/a0/usr/uploads/a.png"]}'};
+  const hash=require('./bridge-core').messageHashes({messages:[message]})[0];
+  const old={attachmentTurnId:'old-position-hash',uploadedAttachments:['/a0/usr/uploads/a.png'],messageHashes:[hash]};
+  assert.deepEqual(uploadedAttachmentsForTurn(old,'new-stable-hash',hash),old.uploadedAttachments);
+  assert.deepEqual(uploadedAttachmentsForTurn(old,'new-stable-hash','different-message'),[]);
+  assert.deepEqual(uploadedAttachmentsForTurn({...old,attachmentIdentityVersion:2},'new-stable-hash',hash),[]);
+});
+
+test('a successful image upload is not repeated after a tool response',()=>{
+  const human={role:'user',content:JSON.stringify({user_message:'Use as imagens',attachments:['/a0/usr/uploads/a.png','/a0/usr/uploads/b.png']})};
+  const first={messages:[human]};
+  const later={messages:[
+    human,
+    {role:'assistant',content:'{"tool_name":"vscode","tool_args":{}}'},
+    {role:'user',content:'{"tool_result":"Workspace pronto"}'},
+  ]};
+  const state={attachmentTurnId:attachmentTurnIdentity(first),uploadedAttachments:attachmentInputs(first)};
+  const alreadyUploaded=new Set(uploadedAttachmentsForTurn(state,attachmentTurnIdentity(later)));
+  const pathsToUpload=attachmentInputs(later).filter(ref=>!alreadyUploaded.has(ref));
+  assert.deepEqual(pathsToUpload,[]);
 });

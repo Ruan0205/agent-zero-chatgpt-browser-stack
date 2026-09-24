@@ -37,9 +37,17 @@ function failedUploadChatUrl(mappedUrl, requestUrl) {
   return mappedUrl || requestUrl || null;
 }
 
-function uploadedAttachmentsForTurn(state, turnId) {
-  return turnId && state?.attachmentTurnId===turnId && Array.isArray(state.uploadedAttachments)
-    ? state.uploadedAttachments : [];
+function uploadedAttachmentsForTurn(state, turnId, latestUserHash) {
+  if(!turnId || !Array.isArray(state?.uploadedAttachments)) return [];
+  if(state.attachmentTurnId===turnId) return state.uploadedAttachments;
+  // Migrate records written with the old position-dependent turn ID. The
+  // message hash proves this human message was already in the prior request.
+  // New records use a stable identity and must not use this fallback, because
+  // a later explicit repeat of an identical prompt is a new upload turn.
+  if(!state.attachmentIdentityVersion && latestUserHash
+    && Array.isArray(state.messageHashes) && state.messageHashes.includes(latestUserHash))
+    return state.uploadedAttachments;
+  return [];
 }
 
 module.exports={imageUploadCount,imageUploadReady,imageUploadTimeoutMs,isImageUploadTimeout,imageUploadFailureAnswer,failedUploadChatUrl,uploadedAttachmentsForTurn};

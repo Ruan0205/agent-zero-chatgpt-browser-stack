@@ -676,11 +676,12 @@ const server = http.createServer(async (req, res) => {
         prompt=nativeMedia ? nativeMediaPrompt(body) : bridge.buildPrompt(requestBody,MAX_PROMPT_CHARS,utilityCall ? null : (chatHash ? known : null),utilityCall ? null : transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY,callScope,preserveUtilityContext:UTILITY_SINGLE_CHAT});
         const allAttachmentRefs=/^main(?:[:]|$)/i.test(callScope) ? bridge.attachmentInputs(body,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY}) : [];
         const attachmentTurnId=bridge.attachmentTurnIdentity(body);
-        const alreadyUploaded=new Set(uploadedAttachmentsForTurn(transportState,attachmentTurnId));
+        const latestActualUser=[...(body.messages||[])].reverse().find(message=>message.role==='user' && bridge.isCurrentUserMessage(message));
+        const latestUserHash=latestActualUser ? bridge.messageHashes({messages:[latestActualUser]})[0] : null;
+        const alreadyUploaded=new Set(uploadedAttachmentsForTurn(transportState,attachmentTurnId,latestUserHash));
         const attachmentRefs=allAttachmentRefs.filter(ref=>!alreadyUploaded.has(ref));
         const uploadPaths=resolveAttachmentPaths(attachmentRefs);
         const browserUploadPaths=uploadPaths.filter(filePath=>!BROWSER_UI_UPLOAD_BLOCKED_EXTENSIONS.has(path.extname(filePath).toLowerCase()));
-        const latestActualUser=[...(body.messages||[])].reverse().find(message=>message.role==='user' && bridge.isCurrentUserMessage(message));
         const latestUserText=latestActualUser ? bridge.extractedUserText(bridge.textContent(latestActualUser.content)) : '';
         // Merely mentioning an attached filename is not a request to create or
         // return that file.  Artifact recovery/base64 compatibility belongs
@@ -776,6 +777,7 @@ const server = http.createServer(async (req, res) => {
               ids:[...known],
               messageHashes:bridge.messageHashes(body),
               toolsHash:bridge.toolsHash(body),
+              attachmentIdentityVersion:2,
               attachmentTurnId,
               uploadedAttachments:[...new Set([...alreadyUploaded,...allAttachmentRefs])],
             }),{mode:0o600});
