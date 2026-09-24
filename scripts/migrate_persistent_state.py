@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 
-VERSION = os.environ.get("STACK_SCHEMA_VERSION", "v2.12-stack.8")
+VERSION = os.environ.get("STACK_SCHEMA_VERSION", "v2.12-stack.9")
 DATA = Path(os.environ.get("STACK_DATA_ROOT", "/data"))
 SEED = Path(os.environ.get("STACK_SEED_ROOT", "/seed"))
 BACKUP = DATA / ".stack-backups" / VERSION

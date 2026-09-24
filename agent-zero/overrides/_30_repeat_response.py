@@ -12,7 +12,7 @@ from helpers.print_style import PrintStyle
 
 STATE_KEY = "_repeated_tool_call_guard"
 MAX_IDENTICAL_TOOL_REPEATS = 2
-MAX_BOUNDED_POLL_REPEATS = 60
+MAX_BOUNDED_POLL_REPEATS = 180
 SENSITIVE_KEYS = {"authorization", "cookie", "key", "password", "secret", "token"}
 
 
@@ -61,6 +61,12 @@ def _is_bounded_status_poll(response: str) -> bool:
     args = payload.get("tool_args")
     if not isinstance(args, dict):
         return False
+    # code_execution_tool returns control periodically while a long command
+    # remains alive. Re-reading that exact session is progress monitoring,
+    # not a repeated write or a model loop. Keep a generous finite safety cap.
+    if args.get("runtime") == "output":
+        session = args.get("session")
+        return isinstance(session, int) and session >= 0
     command = args.get("code")
     if not isinstance(command, str):
         return False
@@ -76,6 +82,28 @@ def _is_bounded_status_poll(response: str) -> bool:
         return False
     # A short sleep alone is not progress; require a process/status read as well.
     return bool(re.search(r"\b(?:ps|cat|stat|test|pgrep)\b", command))
+
+
+def _is_output_poll(response: str) -> bool:
+    try:
+        payload = json.loads(response.strip())
+        args = payload.get("tool_args", {})
+        return payload.get("tool_name") == "code_execution_tool" and args.get("runtime") == "output"
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _last_execution_is_running(agent: Any) -> bool:
+    """Only exempt output polls while the executor explicitly reports a live job."""
+    try:
+        for message in reversed(agent.history.all_messages()[-6:]):
+            content = message.content
+            if isinstance(content, dict) and content.get("tool_name") == "code_execution_tool":
+                result = str(content.get("tool_result", ""))
+                return "[SYSTEM: Returning control to agent" in result and "still running" in result
+    except (AttributeError, TypeError):
+        pass
+    return False
 
 
 def _controlled_fallback(response: str) -> str:
@@ -156,11 +184,10 @@ class RepeatResponse(Extension):
         warning = self.agent.read_prompt("fw.msg_repeat.md")
         log_item = self.agent.loop_data.params_temporary.get("log_item_generating")
         stuck = current[1] if current is not None else "identical textual response"
-        max_repeats = (
-            MAX_BOUNDED_POLL_REPEATS
-            if current is not None and _is_bounded_status_poll(response)
-            else MAX_IDENTICAL_TOOL_REPEATS
-        )
+        bounded_poll = current is not None and _is_bounded_status_poll(response)
+        if bounded_poll and _is_output_poll(response):
+            bounded_poll = _last_execution_is_running(self.agent)
+        max_repeats = MAX_BOUNDED_POLL_REPEATS if bounded_poll else MAX_IDENTICAL_TOOL_REPEATS
         if consecutive < max_repeats:
             if max_repeats == MAX_BOUNDED_POLL_REPEATS:
                 # Let the poll run. Its tool result may change as the job finishes;

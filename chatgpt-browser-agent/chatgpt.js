@@ -31,8 +31,9 @@ const crypto              = require('crypto');
 const readline            = require('readline');
 const { execSync, spawn } = require('child_process');
 const { activeProviderRejection } = require('./provider-rejection');
-const { canCollectCompletedTurn } = require('./completion-state');
+const { canCollectCompletedTurn, isDownloadTextCandidate, isCompletedEmptyTurn } = require('./completion-state');
 const { imageUploadCount, imageUploadReady, imageUploadTimeoutMs } = require('./image-upload');
+const { composerChunks, normalizeComposerText } = require('./composer-chunks');
 
 const puppeteer = addExtra(puppeteerCore);
 puppeteer.use(StealthPlugin());
@@ -736,9 +737,9 @@ function launchBrowser() {
   });
 }
 
-// Single DOM operation — no keystroke simulation, no chunking, no delay.
-// execCommand('insertText') is the fastest reliable way to fill a
-// React-controlled contenteditable without breaking its event listeners.
+// Short prompts use one DOM insertion. Large first-turn prompts use bounded
+// browser input events: one huge execCommand transaction could freeze Chrome
+// and exhaust host memory before the message was ever submitted.
 async function dismissBlockingOverlays(page, log) {
   for (let pass=0; pass<4; pass++) {
     const action=await page.evaluate(() => {
@@ -788,13 +789,16 @@ async function dismissBlockingOverlays(page, log) {
   if(blocked) throw new Error(`A popup is still blocking the ChatGPT composer (${blocked})`);
 }
 
-async function fillTextarea(page, text) {
+async function fillTextarea(page, text, log=()=>{}) {
   await page.bringToFront();
   await page.waitForFunction(()=>{
     const el=document.querySelector('#prompt-textarea');
     return el && el.getBoundingClientRect().height>0 && (el.isContentEditable || el.tagName==='TEXTAREA');
   },{timeout:60000});
-  const normalized=s=>s.replace(/\r/g,'').replace(/\n+/g,'\n').trim();
+  const normalized=normalizeComposerText;
+  const longPrompt=text.length>8_000;
+  const chunks=longPrompt ? composerChunks(text,1024) : [];
+  if(longPrompt) log(`Filling large composer with ${chunks.length} bounded input events (${text.length} characters)`);
   for(let attempt=0;attempt<3;attempt++) {
     // The composer can be replaced once or twice while a newly opened ChatGPT
     // page finishes hydrating.  Inserting immediately into the old node looks
@@ -813,24 +817,122 @@ async function fillTextarea(page, text) {
     await page.keyboard.up('Control');
     await page.keyboard.press('Backspace');
 
-    // execCommand keeps ProseMirror/React's normal beforeinput/input pathway
-    // while performing one atomic insertion.  sendCharacter() can lose large
-    // prompts when four browser instances hydrate concurrently.
-    const inserted=await page.$eval('#prompt-textarea',(el,value)=>{
-      el.focus();
-      if(el.tagName==='TEXTAREA') {
-        const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
-        setter?.call(el,value);
-        el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));
-        return true;
+    // Each chunk uses the editor's normal input pathway. Verify each prefix
+    // after the editor has had time to commit it: under load ProseMirror can
+    // silently discard one complete Input.insertText event while accepting
+    // later chunks, which a final-only check cannot recover efficiently.
+    if(longPrompt) {
+      let prefix='';
+      let prefixFailed=false;
+      for(let i=0;i<chunks.length;i++) {
+        // ProseMirror may replace the editor node between input events and
+        // leave the selection inside the preceding chunk. Explicitly anchor
+        // each continuation at the end so no bytes are reordered or lost.
+        await page.$eval('#prompt-textarea',el=>{
+          el.focus();
+          if(el.tagName==='TEXTAREA') {
+            el.setSelectionRange(el.value.length,el.value.length);
+          } else {
+            const range=document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            const selection=window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+        });
+        await page.keyboard.sendCharacter(chunks[i]);
+        const previous=prefix;
+        prefix+=chunks[i];
+        let actual='';
+        let matched=false;
+        for(let poll=0;poll<10;poll++) {
+          await new Promise(r=>setTimeout(r,120));
+          actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>'');
+          if(normalized(actual)===normalized(prefix)) { matched=true; break; }
+        }
+        if(!matched && normalized(actual)===normalized(previous)) {
+          log(`Composer discarded chunk ${i+1}; reinserting it once`);
+          await page.$eval('#prompt-textarea',el=>{
+            el.focus();
+            if(el.tagName==='TEXTAREA') el.setSelectionRange(el.value.length,el.value.length);
+            else {
+              const range=document.createRange();
+              range.selectNodeContents(el);
+              range.collapse(false);
+              const selection=window.getSelection();
+              selection.removeAllRanges();
+              selection.addRange(range);
+            }
+          });
+          await page.keyboard.sendCharacter(chunks[i]);
+          for(let poll=0;poll<10;poll++) {
+            await new Promise(r=>setTimeout(r,120));
+            actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>'');
+            if(normalized(actual)===normalized(prefix)) { matched=true; break; }
+          }
+        }
+        if(!matched && normalized(actual)===normalized(previous)) {
+          // CDP Input.insertText can be ignored by an already-hydrated
+          // contenteditable. Try its native edit transaction for this one
+          // bounded chunk before restarting the whole draft.
+          const inserted=await page.$eval('#prompt-textarea',(el,value)=>{
+            el.focus();
+            if(el.tagName==='TEXTAREA') {
+              const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
+              setter?.call(el,el.value+value);
+              el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));
+              return true;
+            }
+            const range=document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            const selection=window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return document.execCommand('insertText',false,value);
+          },chunks[i]);
+          log(`Composer fallback insert for chunk ${i+1}: ${inserted}`);
+          for(let poll=0;poll<10;poll++) {
+            await new Promise(r=>setTimeout(r,120));
+            actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>'');
+            if(normalized(actual)===normalized(prefix)) { matched=true; break; }
+          }
+        }
+        if(!matched) {
+          const a=normalized(actual), b=normalized(prefix);
+          let offset=0; while(offset<Math.min(a.length,b.length)&&a[offset]===b[offset]) offset++;
+          const codes=s=>[...s.slice(Math.max(0,offset-6),offset+12)].map(ch=>ch.codePointAt(0));
+          const controls=[...chunks[i]].map((ch,j)=>({code:ch.codePointAt(0),at:j})).filter(x=>x.code<32 && ![9,10,13].includes(x.code)).slice(0,12);
+          log(`Composer prefix mismatch after chunk ${i+1}/${chunks.length}: actual=${a.length} expected=${b.length} offset=${offset} actual_codes=${JSON.stringify(codes(a))} expected_codes=${JSON.stringify(codes(b))} control_codes=${JSON.stringify(controls)}; restarting from an empty draft`);
+          prefixFailed=true;
+          break;
+        }
+        if(i===0 || (i+1)%4===0 || i===chunks.length-1)
+          log(`Large composer input ${i+1}/${chunks.length} attempt ${attempt+1}`);
       }
-      document.execCommand('selectAll',false,null);
-      return document.execCommand('insertText',false,value);
-    },text);
-    if(!inserted) await page.keyboard.sendCharacter(text);
+      if(prefixFailed) continue;
+    } else {
+      const inserted=await page.$eval('#prompt-textarea',(el,value)=>{
+        el.focus();
+        if(el.tagName==='TEXTAREA') {
+          const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
+          setter?.call(el,value);
+          el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:value}));
+          return true;
+        }
+        document.execCommand('selectAll',false,null);
+        return document.execCommand('insertText',false,value);
+      },text);
+      if(!inserted) await page.keyboard.sendCharacter(text);
+    }
     await new Promise(r=>setTimeout(r,500+attempt*500));
     const actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>"");
     if(normalized(actual)===normalized(text)) return;
+    const a=normalized(actual), b=normalized(text);
+    let offset=0; while(offset<Math.min(a.length,b.length)&&a[offset]===b[offset]) offset++;
+    const codes=s=>[...s.slice(Math.max(0,offset-6),offset+12)].map(ch=>ch.codePointAt(0));
+    log(`Composer verification failed on attempt ${attempt+1}: raw=${actual.length}/${text.length} normalized=${a.length}/${b.length} offset=${offset} actual_codes=${JSON.stringify(codes(a))} expected_codes=${JSON.stringify(codes(b))}`);
   }
   throw new Error('Composer failed verified insertion after 3 attempts; nothing submitted');
 }
@@ -914,6 +1016,7 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
       Date.now()+RESPONSE_START_TIMEOUT
     );
     let activityObserved=false;
+    let emptyCompletedSince=0;
     while(Date.now()<(activityObserved?requestDeadline:initialStartDeadline)) {
       const rejection=await readProviderRejection(page);
       if(rejection) throw new Error(`ChatGPT rejected the request: ${rejection}`);
@@ -939,13 +1042,24 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         });
         const started=!!turn && turn!==before && ((!progressOnly&&text)||media) ? {turn,text:(!progressOnly&&text)||'[media started]'} : null;
         const busy=!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]');
-        return {started,busy};
+        const completedEmpty=!!turn && turn!==before && !!currentAssistant
+          && !text && !media && !busy
+          && !!latestTurn?.querySelector('button[data-testid="copy-turn-action-button"]');
+        return {started,busy,completedEmpty};
       },{before:beforeTurnId,submittedUser:submittedUserTurnId}).catch(()=>null);
       if(phase?.busy&&!activityObserved) {
         activityObserved=true;
         log('Visible ChatGPT processing detected before assistant turn; preserving the active generation until the request deadline');
       }
       const started=phase?.started;
+      if(phase?.completedEmpty) {
+        if(!emptyCompletedSince) emptyCompletedSince=Date.now();
+        if(Date.now()-emptyCompletedSince>=8_000) {
+          const error=new Error('ChatGPT completed an empty assistant turn');
+          error.code='CHATGPT_COMPLETED_EMPTY_TURN';
+          throw error;
+        }
+      } else emptyCompletedSince=0;
       if(started) {
         responseTurnId=started.turn;
         if(/message you submitted was too long|please edit it and resubmit|request is too large/i.test(started.text))
@@ -1016,6 +1130,7 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         return el.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(el.href||'') ? [`file:${el.href}`] : [];
       }).sort().join('|');
       return {turnId,expectedTurnId,isExpected:turnId===expectedTurnId,text:last?.innerText || '',envelope,media,
+        hasCodeBlock:!!codes?.length,
         failed:!!turn?.querySelector('button[data-testid="regenerate-thread-error-button"]'),
         busy:!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]'),
         final:!!turn?.querySelector('button[data-testid="copy-turn-action-button"],button[data-testid="good-response-turn-action-button"],button[data-testid="bad-response-turn-action-button"]')};
@@ -1026,7 +1141,11 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
     else stableCount = 0;
     if(Date.now()>deadline-1500) log(`final timeout state: ${JSON.stringify(state).slice(0,4000)}`);
     lastText = state.text;
-    const downloadText=/\bDownload\s+[^\n]+\.[a-z0-9.]{1,12}\b/i.test(state.text||'') ? state.text : '';
+    // A fenced Agent Zero JSON tool call can contain installer URLs and the
+    // word "Download" inside its code string. It is never a downloadable-file
+    // answer. Let the envelope branch below return the verbatim code instead
+    // of rendered Markdown (which begins with the UI label "JSON").
+    const downloadText=isDownloadTextCandidate(state) ? state.text : '';
     if(downloadText && downloadText===stableDownloadText) {
       if(!downloadTextSince) downloadTextSince=Date.now();
       if(canCollectCompletedTurn(state,Date.now()-downloadTextSince,2000)) {
@@ -1352,12 +1471,12 @@ async function startDaemonProcess() {
             : 0;
 
           await dismissBlockingOverlays(page, log);
-          await fillTextarea(page, promptToSend);
+          await fillTextarea(page, promptToSend, log);
           const inserted = await page.$eval('#prompt-textarea', el => el.value ?? el.innerText);
           // ProseMirror renders paragraphs as doubled line breaks in innerText.
           // JSON transcript newlines are escaped, so normalize only DOM line
           // separators, not spaces/indentation inside transcript values.
-          const normalizeComposer = s => s.replace(/\r/g,'').replace(/\n+/g,'\n').trim();
+          const normalizeComposer = normalizeComposerText;
           if (normalizeComposer(inserted) !== normalizeComposer(promptToSend)) {
             const a=normalizeComposer(inserted), b=normalizeComposer(promptToSend);
             let at=0; while(at<Math.min(a.length,b.length)&&a[at]===b[at]) at++;

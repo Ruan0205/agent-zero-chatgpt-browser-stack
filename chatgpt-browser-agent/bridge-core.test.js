@@ -1,11 +1,43 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const {buildPrompt,validateAnswer,attachmentInputs,attachmentTurnIdentity,isAgentTurn,browserActionContext,operationalActionContext,extractedUserText,isCurrentUserMessage}=require('./bridge-core');
+const {buildPrompt,validateAnswer,attachmentInputs,attachmentTurnIdentity,isAgentTurn,browserActionContext,operationalActionContext,executionSessionNotice,extractedUserText,isCurrentUserMessage,messageHashes}=require('./bridge-core');
 const system={role:'system',content:'# Agent Zero System Manual\n## available tools\n### code_execution_tool\nFULL TOOL DOCS'};
 const body=messages=>({messages:[system,...messages]});
 test('large tool output is bounded without discarding real task or tool schema',()=>{
  const p=buildPrompt(body([{role:'user',content:'{"user_message":"investigate malware, not inventory"}'},{role:'assistant',content:'{"tool_name":"code_execution_tool"}'},{role:'user',content:'{"tool_result":"'+ 'X'.repeat(35000)+'"}'}]));
  assert.ok(p.includes('investigate malware, not inventory'));assert.ok(p.includes('FULL TOOL DOCS'));assert.ok(p.includes('tool_result compacted by transport'));assert.ok(p.length<64000);
+});
+test('mapped browser chat bounds a long appended tool result for its smaller composer',()=>{
+ const previous=body([{role:'user',content:'{"user_message":"prepare a stack"}'}]);
+ const next=body([
+  ...previous.messages.slice(1),
+  {role:'assistant',content:'{"tool_name":"code_execution_tool"}'},
+  {role:'user',content:JSON.stringify({tool_name:'code_execution_tool',tool_result:'x'.repeat(18000)}),name:'tool'},
+ ]);
+ const priorState={messageHashes:messageHashes(previous)};
+ const prompt=buildPrompt(next,180000,null,priorState,{browserOwnsHistory:true,callScope:'main:0'});
+ assert.ok(prompt.length<=6500,`unexpected prompt length ${prompt.length}`);
+ assert.ok(prompt.includes('tool_result compacted by transport'));
+ assert.ok(prompt.includes('original_chars=18000'));
+});
+test('mapped chat separates a fresh user request appended to a long tool result',()=>{
+ const previous=body([{role:'user',content:'{"user_message":"prepare a stack"}'}]);
+ const mixed=JSON.stringify({tool_name:'code_execution_tool',tool_result:'x'.repeat(18000)})+' {"user_message":"Continue de onde parou."}';
+ const next=body([...previous.messages.slice(1),{role:'user',content:mixed}]);
+ const prompt=buildPrompt(next,180000,null,{messageHashes:messageHashes(previous)},{browserOwnsHistory:true,callScope:'main:0'});
+ assert.ok(prompt.length<=6500,`unexpected prompt length ${prompt.length}`);
+ assert.ok(prompt.includes('Continue de onde parou.'));
+ assert.ok(prompt.includes('tool_result compacted by transport'));
+});
+test('rebased Agent Zero history keeps latest request without replaying old serialized logs',()=>{
+ const payload=JSON.stringify({tool_name:'code_execution_tool',tool_result:'x'.repeat(16000)})
+  +'\n{"user_message":"Continue a instalação no Windows."}'
+  +'\n[EXTRAS]\n{"solutions":"historical note"}';
+ const prompt=buildPrompt(body([{role:'user',content:payload}]),180000,null,{messageHashes:['different-history-hash']},{browserOwnsHistory:true,callScope:'main:0'});
+ assert.ok(prompt.length<=6500,`unexpected prompt length ${prompt.length}`);
+ assert.ok(prompt.includes('Continue a instalação no Windows.'));
+ assert.ok(prompt.includes('tool_result compacted by transport'));
+ assert.ok(!prompt.includes('historical note'));
 });
 test('old inventory is context only, latest request survives',()=>{
  const p=buildPrompt(body([{role:'user',content:'=== RESUMO DO HOST === old inventory'},{role:'user',content:'{"user_message":"explain rainbows"}'}]));assert.ok(p.includes('explain rainbows'));assert.ok(p.includes('old inventory'));
@@ -276,4 +308,26 @@ test('input-file analysis with explicit no-return clause does not require media 
  const request='Abra o anexo real entrada-09.xls, valide o arquivo e responda JSON. Não crie, edite nem devolva arquivos neste teste.';
  const intent=operationalActionContext(body([{role:'user',content:JSON.stringify({user_message:request})}]));
  assert.ok(!intent.requiredTools.includes('chatgpt_browser_media'));
+});
+
+test('completed terminal session is explicit even when its large output is compacted',()=>{
+ const terminal=JSON.stringify({tool_name:'code_execution_tool',tool_result:'HTTP_STATUS=200\n'+'x'.repeat(16000)+'\n[SYSTEM: Terminal shell exited with exit code 0. The command has finished; a new shell will be created before the next command.]'});
+ const previous=body([{role:'user',content:JSON.stringify({user_message:'verify server'})}]);
+ const current=body([...previous.messages.slice(1),{role:'assistant',content:'{"tool_name":"code_execution_tool"}'},{role:'user',content:terminal,name:'tool'}]);
+ const prompt=buildPrompt(current,180000,null,{messageHashes:messageHashes(previous)},{browserOwnsHistory:true,callScope:'main:0'});
+ assert.match(prompt,/terminal shell has EXITED/);
+ assert.match(prompt,/Do not call code_execution_tool runtime=output/);
+ assert.ok(prompt.length<=6500);
+ assert.match(executionSessionNotice(current),/EXITED/);
+});
+
+test('pending terminal session instructs a same-session poll, not duplicate execution',()=>{
+ const current=body([{role:'user',content:JSON.stringify({tool_name:'code_execution_tool',tool_result:'[SYSTEM: Returning control to agent after 60 seconds since last output update. Process might be still running.]'})}]);
+ assert.match(executionSessionNotice(current),/STILL RUNNING/);
+});
+
+test('completed terminal marker survives malformed serialized tool output',()=>{
+ const content='{"tool_name":"code_execution_tool","tool_result":"WAN301_END\n[SYSTEM: Terminal shell exited with exit code 1. The command has finished.]"}';
+ assert.throws(()=>JSON.parse(content));
+ assert.match(executionSessionNotice(body([{role:'user',content}])),/EXITED/);
 });

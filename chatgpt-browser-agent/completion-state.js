@@ -8,4 +8,15 @@ function canCollectCompletedTurn(state, stableMs, minimumMs) {
   return Boolean(state.final || !state.busy);
 }
 
-module.exports={canCollectCompletedTurn};
+function isDownloadTextCandidate(state) {
+  // A code block can mention "Download foo.whl" inside a tool command. It is
+  // never evidence that ChatGPT produced a downloadable artifact.
+  return Boolean(!state?.hasCodeBlock && /\bDownload\s+[^\n]+\.[a-z0-9.]{1,12}\b/i.test(state?.text || ''));
+}
+
+function isCompletedEmptyTurn(state) {
+  return Boolean(state?.isExpected && state.hasAssistant && state.final
+    && !state.busy && !state.text?.trim() && !state.media);
+}
+
+module.exports={canCollectCompletedTurn,isDownloadTextCandidate,isCompletedEmptyTurn};

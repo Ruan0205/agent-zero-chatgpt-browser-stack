@@ -3,13 +3,13 @@ name: agent-zero-browser-stack
 services:
   bootstrap:
     build: ./bootstrap
-    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.8}
+    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.9}
     container_name: agent-zero-bootstrap
     restart: "no"
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
       CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
-      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.8}
+      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.9}
     volumes:
       - ./scripts/bootstrap.sh:/bootstrap.sh:ro
       - ./scripts/migrate_persistent_state.py:/migrate_persistent_state.py:ro
@@ -206,6 +206,9 @@ services:
       - ./agent-zero/overrides/model_presets.py:/a0/plugins/_model_config/api/model_presets.py:ro
       - ./agent-zero/overrides/model_config.py:/a0/plugins/_model_config/helpers/model_config.py:ro
       - ./agent-zero/overrides/_30_repeat_response.py:/a0/extensions/python/message_loop_result/_30_repeat_response.py:ro
+      - ./agent-zero/overrides/nudge.py:/a0/api/nudge.py:ro
+      - ./agent-zero/overrides/api_message.py:/a0/api/api_message.py:ro
+      - ./agent-zero/overrides/_20_cleanup_expired_api_chats.py:/a0/extensions/python/job_loop/_20_cleanup_expired_api_chats.py:ro
       - ./agent-zero/overrides/_90_organize_history_wait.py:/a0/extensions/python/message_loop_prompts_before/_90_organize_history_wait.py:ro
       - ./agent-zero/overrides/_95_bound_large_tool_result.py:/a0/extensions/python/hist_add_tool_result/_95_bound_large_tool_result.py:ro
       - ./agent-zero/overrides/_60_rename_chat.py:/a0/plugins/_chat_naming/extensions/python/monologue_end/_60_rename_chat.py:ro

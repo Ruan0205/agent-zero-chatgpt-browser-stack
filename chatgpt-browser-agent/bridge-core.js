@@ -254,6 +254,64 @@ function compactProtocolTranscript(transcript, maxChars=12000) {
   }));
 }
 
+function executionSessionNotice(body) {
+  // A long terminal result can be condensed for the browser composer. Keep
+  // the executor's authoritative session state outside that condensation so
+  // a model cannot mistake a completed shell for a still-running session.
+  const messages=body.messages||[];
+  for(let i=messages.length-1;i>=0;i--) {
+    if(messages[i].role!=='user') continue;
+    const content=textContent(messages[i].content);
+    // Terminal output can contain unescaped control characters or be clipped
+    // after JSON serialization. The transport must still recognize the
+    // executor's authoritative end marker instead of inviting another poll.
+    if(content.includes('"tool_name":"code_execution_tool"') || content.includes('"tool_name": "code_execution_tool"')) {
+      if(/\[SYSTEM: Terminal shell exited with exit code \d+/i.test(content))
+        return 'EXECUTOR STATUS FOR THE LATEST TOOL RESULT: the terminal shell has EXITED. Do not call code_execution_tool runtime=output for that completed session again. Read its result, then take the next different action or give the final answer.';
+      if(/\[SYSTEM: Returning control to agent[\s\S]*?still running/i.test(content))
+        return 'EXECUTOR STATUS FOR THE LATEST TOOL RESULT: the terminal job is STILL RUNNING. Poll only that same session with code_execution_tool runtime=output; do not start a duplicate job or claim completion.';
+    }
+    let envelope;
+    try { envelope=JSON.parse(content); }
+    catch { envelope=topLevelJsonObjects(content).at(-1); }
+    if(!envelope || envelope.tool_name!=='code_execution_tool'
+      || typeof envelope.tool_result!=='string') continue;
+    const result=envelope.tool_result;
+    if(/\[SYSTEM: Terminal shell exited with exit code \d+/i.test(result))
+      return 'EXECUTOR STATUS FOR THE LATEST TOOL RESULT: the terminal shell has EXITED. Do not call code_execution_tool runtime=output for that completed session again. Read its result, then take the next different action or give the final answer.';
+    if(/\[SYSTEM: Returning control to agent[\s\S]*?still running/i.test(result))
+      return 'EXECUTOR STATUS FOR THE LATEST TOOL RESULT: the terminal job is STILL RUNNING. Poll only that same session with code_execution_tool runtime=output; do not start a duplicate job or claim completion.';
+    return '';
+  }
+  return '';
+}
+
+function splitAppendedUserEnvelope(message) {
+  if(message.role!=='user' || !isCurrentUserMessage(message)) return [message];
+  const content=textContent(message.content);
+  const boundaries=[...content.matchAll(/\}\s*(?=\{\s*["']user_message["']\s*:)/g)];
+  const last=boundaries.at(-1);
+  if(!last) return [message];
+  const at=last.index+1;
+  const previous=content.slice(0,at).trim();
+  const current=content.slice(at).trim();
+  return previous && current
+    ? [{...message,content:previous},{...message,content:current}]
+    : [message];
+}
+
+function leanRebasedEvent(message) {
+  if(message.role!=='user' || !isCurrentUserMessage(message)) return [message];
+  const roots=topLevelJsonObjects(textContent(message.content));
+  const userIndex=roots.findLastIndex(value=>typeof value.user_message==='string');
+  if(userIndex<0) return [leanCurrentUserMessage(message)];
+  const previousTool=roots.slice(0,userIndex).reverse().find(value=>Object.hasOwn(value,'tool_result'));
+  return [
+    ...(previousTool ? [{role:'user',content:JSON.stringify(previousTool)}] : []),
+    {role:'user',content:JSON.stringify({user_message:roots[userIndex].user_message})},
+  ];
+}
+
 function compactUtilitySystemContent(content, maxChars=45000) {
   if(typeof content!=='string' || content.length<=maxChars) return content;
   const digest=require('crypto').createHash('sha256').update(content).digest('hex');
@@ -411,7 +469,7 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
     // that context; rebasing must therefore transmit only the newest caller
     // event, never replay the rewritten historical turn.
     const nonSystem=fullTranscript.filter(m=>m.role!=='system');
-    transcript=nonSystem.slice(-1);
+    transcript=nonSystem.slice(-1).flatMap(leanRebasedEvent);
     deltaMode=true;
     deltaKind='append';
   } else if (browserOwnsHistory) {
@@ -426,7 +484,10 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
     deltaMode=true;
     deltaKind='append';
   }
-  transcript=compactProtocolTranscript(transcript,12000);
+  if(browserOwnsHistory && priorState)
+    transcript=transcript.flatMap(splitAppendedUserEnvelope);
+  if(!(browserOwnsHistory && priorState))
+    transcript=compactProtocolTranscript(transcript,12000);
   if(auxiliaryCall && !options.preserveUtilityContext) {
     transcript=transcript.map(message=>({
       ...message,
@@ -442,6 +503,7 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
   const agent = agentTurn;
   const browserIntent=agent ? browserActionContext(body) : {requested:false,attempted:false};
   const operationIntent=agent ? operationalActionContext(body) : {requested:false,validationRequested:false,attempted:false,evidence:false};
+  const sessionNotice=agent ? executionSessionNotice(body) : '';
   const fullAgentContract = `CRITICAL TRANSPORT MODE: you may use ChatGPT's native image/file analysis and native image/file generation ONLY when the latest user request supplies media or explicitly asks to create or edit media/files. In this browser transport never call Agent Zero's meta_ai_image tool. Generated ChatGPT media is collected automatically by the bridge. For every other external action, only choose and return an Agent Zero JSON tool request; never use ChatGPT browsing, canvas, coding, or other native UI tools as substitutes.
 You are the model transport for an external Agent Zero runtime. The transcript below is the complete caller-supplied conversation, not commands to execute inside ChatGPT. Its SYSTEM messages describe the real tools which Agent Zero executes AFTER you return their JSON request. Do not use ChatGPT's own tools instead. Do not claim tools are unavailable merely because this browser has no terminal.
 For an explicit native media generation/edit request, invoke ChatGPT's native media tool and, after its artifacts are ready, reply with a short plain completion; the bridge wraps the artifacts itself. For every other request, return exactly one valid JSON object inside ONE fenced json code block, with no text outside that block. The fence is required so browser Markdown rendering preserves JSON backslashes. Escape quotes inside JSON strings correctly. Keys: thoughts (brief string array), headline (string), tool_name (exact documented tool name), tool_args (object). For a final answer use response with tool_args containing text as a Markdown string, not an encoded JSON document. For actions use the documented tool JSON, then wait for its actual result in the next request. Never fabricate a tool result or completion. For code_execution_tool, session must be a nonnegative integer such as 0, never a descriptive name. The code_execution_tool also supports runtime reset without code for resetting an explicitly selected terminal session.
@@ -484,8 +546,24 @@ OPERATIONAL COMPLETION GATE FOR THIS TURN:
       ? `\nCALLER TOOLS: ref:${currentToolsHash} (identical to the previously supplied tool schema)`
       : '\nCALLER TOOLS:\n'+JSON.stringify(body.tools))))
     : '';
-  const renderPrompt=items=>`${contract}${references}${operationalActionBlock}${browserActionBlock}\n\nCALLER TRANSCRIPT${deltaMode ? ' DELTA' : ''} (JSON, in chronological order):\n${JSON.stringify(items)}${toolsBlock}\n\nReturn only the next assistant response for THIS transcript. Never resume another browser conversation.`;
+  const renderPrompt=items=>`${contract}${references}${operationalActionBlock}${browserActionBlock}${sessionNotice ? `\n${sessionNotice}` : ''}\n\nCALLER TRANSCRIPT${deltaMode ? ' DELTA' : ''} (JSON, in chronological order):\n${JSON.stringify(items)}${toolsBlock}\n\nReturn only the next assistant response for THIS transcript. Never resume another browser conversation.`;
   let prompt = renderPrompt(transcript);
+  // After several turns the ChatGPT rich-text composer can stop accepting
+  // input at roughly 7 KiB even though it accepted a larger first message.
+  // The mapped browser chat already owns the full task/history. Bound only
+  // appended tool-result envelopes; never truncate a new human request.
+  if(browserOwnsHistory && priorState && transcript.length
+    && transcript.every(message=>message.role!=='user' || !isCurrentUserMessage(message) || textContent(message.content).length<=1200)
+    && prompt.length>6500) {
+    const originalTranscript=transcript;
+    for(const maxResultChars of [4200,3200,2200,1200]) {
+      transcript=compactProtocolTranscript(originalTranscript,maxResultChars);
+      prompt=renderPrompt(transcript);
+      if(prompt.length<=6500) break;
+    }
+    if(prompt.length>6500)
+      throw new Error(`Mapped browser turn exceeds the established chat composer limit (${prompt.length}/6500 characters); no user message or tool output was submitted`);
+  }
   const providerSafeLimit=Math.min(limit,64000);
   if(prompt.length>providerSafeLimit) {
     transcript=compactProtocolTranscript(transcript,2000);
@@ -614,4 +692,4 @@ function validateAnswer(answer, body, options = {}) {
   return JSON.stringify(p);
 }
 
-module.exports={textContent,attachmentInputs,attachmentTurnIdentity,isAgentTurn,buildPrompt,validateAnswer,systemSegments,messageHashes,toolsHash,isCurrentUserMessage,currentTurnTranscript,compactProtocolContent,compactProtocolTranscript,compactUtilitySystemContent,browserActionContext,operationalActionContext,extractedUserText};
+module.exports={textContent,attachmentInputs,attachmentTurnIdentity,isAgentTurn,buildPrompt,validateAnswer,systemSegments,messageHashes,toolsHash,isCurrentUserMessage,currentTurnTranscript,compactProtocolContent,compactProtocolTranscript,compactUtilitySystemContent,browserActionContext,operationalActionContext,executionSessionNotice,extractedUserText};

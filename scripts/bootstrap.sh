@@ -38,8 +38,13 @@ copy_once() {
 
 copy_once "$seed_root/settings.json" "$data_root/agent-zero/settings.json"
 copy_once "$seed_root/server_context.md" "$data_root/agent-zero/server_context.md"
+for profile in default developer hacker researcher tiny-local; do
+  copy_once "$seed_root/agents/$profile/agent.yaml" "$data_root/agent-zero/agents/$profile/agent.yaml"
+done
+copy_once "$seed_root/agents/agent0/prompts/agent.system.main.specifics.md" "$data_root/agent-zero/agents/agent0/prompts/agent.system.main.specifics.md"
 copy_once "$seed_root/plugins/_model_config/config.json" "$data_root/agent-zero/plugins/_model_config/config.json"
 copy_once "$seed_root/plugins/_model_config/presets.yaml" "$data_root/agent-zero/plugins/_model_config/presets.yaml"
+copy_once "$seed_root/plugins/_code_execution/config.json" "$data_root/agent-zero/plugins/_code_execution/config.json"
 
 if [ ! -e "$data_root/agent-zero/plugins/browser_session_bridge/plugin.yaml" ]; then
   cp -R "$seed_root/plugins/browser_session_bridge/." "$data_root/agent-zero/plugins/browser_session_bridge/"

@@ -9,18 +9,35 @@ rules:
 - place the command or script in `code`
 - use `runtime=output` to poll running work
 - use `input` for interactive terminal prompts
-- if a session is stuck, call again with the same `session` and `reset=true`
+- if a session seems stuck, first inspect its exact process tree and progress;
+  reset only the confirmed disposable session, never a service or unrelated job
 - check dependencies before running code
 - replace placeholder or demo data with real values before execution
 - use `print()` or `console.log()` when you need explicit output
 - do not interleave other tools while waiting
 - treat trailing framework `[SYSTEM: ...]` info as execution status, not command output; use it to decide whether to wait, reset, rerun, or continue
 - probe cwd files tools and dependencies before expensive commands
+- when searching source code, use targeted paths and file globs (`rg` when available);
+  exclude virtual environments, installed dependencies, caches, and compiled files
+  such as `venv`, `.venv`, `node_modules`, `__pycache__`, `.pyc`, and build outputs
+- avoid recursive PowerShell `Get-ChildItem` scans over a project root that contains
+  dependencies; inspect the likely source file or directory first, then broaden only
+  if needed and keep the search bounded
+- in PowerShell scripts, never assign to automatic variables such as `$HOME`, `$PID`,
+  `$PWD`, or `$PSHOME`; use task-specific variable names instead
+- when Python starts a long-lived service, do not use `subprocess.run` with
+  `capture_output=True` on a launcher whose children may inherit the pipes;
+  redirect output to files, start without waiting for descendants, then poll a
+  separate health endpoint or process state with a bounded deadline
 - split long work into small commands: inspect, prepare, run, verify
 - for builds installs servers training and long tests, redirect logs and poll with `runtime=output`
 - for commands that can emit large output, write full stdout/stderr to files and return only compact status, PID, exit code, and a short tail; poll the same session with `runtime=output`
 - in PowerShell downloads/installers, set `$ProgressPreference = 'SilentlyContinue'` unless progress output is explicitly needed; progress/CLIXML streams can flood model context
 - after timeout or pause, inspect logs and processes before deciding wait reset or stop
+- before costly GPU, model, compiler, or network diagnostics, set a bounded test
+  deadline and write progress to a file. A silent but active process may be healthy;
+  a repeated poll with no new evidence is not progress. On deadline, stop only
+  PIDs verified to belong to that isolated test and change the test hypothesis
 - never claim success from timeout partial output or a still-running command
 - stop stale background processes you started before final response
 - when exact output matters, verify file path line count bytes and content with commands

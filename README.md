@@ -2,7 +2,7 @@
 
 Distribuição reproduzível da **stack Agent Zero + ChatGPT Browser** desta instalação: modelo acessado pela interface web do ChatGPT, Featherless, VS Code no navegador, WhatsApp/Meta AI e ferramentas administrativas do host Linux.
 
-**Versão suportada para novas instalações: `v2.12-stack.8`.** A branch `main` aponta para essa release; tags anteriores são histórico/rollback, não alternativas de instalação recomendadas. Instale pelo tag fixo para obter exatamente os arquivos documentados aqui. Não copie o Compose antigo do servidor de origem nem misture arquivos de outras tags.
+**Versão suportada para novas instalações: `v2.12-stack.9`.** A branch `main` aponta para essa release; tags anteriores são histórico/rollback, não alternativas de instalação recomendadas. Instale pelo tag fixo para obter exatamente os arquivos documentados aqui. Não copie o Compose antigo do servidor de origem nem misture arquivos de outras tags.
 
 O repositório contém as customizações funcionais da stack, mas **não contém** contas Google/ChatGPT, sessões do WhatsApp, chats, memórias, cookies, uploads, chaves de API, senhas ou dados pessoais. Cada instalação começa vazia e exige seus próprios logins. Serviços externos à stack (como Nextcloud e projetos pessoais), integrações específicas do Windows do proprietário e dados da máquina original não fazem parte do clone.
 
@@ -78,7 +78,7 @@ O Chrome é executado no container; não é necessária GPU.
 ## Instalação rápida
 
 ```bash
-git clone --branch v2.12-stack.8 --depth 1 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
+git clone --branch v2.12-stack.9 --depth 1 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
 cd agent-zero-chatgpt-browser-stack
 git describe --tags --exact-match
 chmod +x scripts/*.sh
@@ -98,7 +98,7 @@ No mínimo, configure:
 - `WA_PHONE`: telefone com DDI e somente dígitos, se for usar Meta AI/WhatsApp.
 - `PUBLIC_HOST` e `PUBLIC_BASE_URL`: IP ou hostname acessível na rede.
 
-Confirme que `API_KEY_OTHER` não continua como placeholder, que `STACK_SCHEMA_VERSION=v2.12-stack.8` e que as portas estão livres. No **primeiro boot**, suba a base e o Chrome antes dos serviços que dependem do login:
+Confirme que `API_KEY_OTHER` não continua como placeholder, que `STACK_SCHEMA_VERSION=v2.12-stack.9` e que as portas estão livres. No **primeiro boot**, suba a base e o Chrome antes dos serviços que dependem do login:
 
 ```bash
 docker compose up -d --build bootstrap featherless-queue meta-ai-whatsapp vscode chatgpt-browser-agent
@@ -230,7 +230,7 @@ docker compose restart chatgpt-browser-agent
 docker compose up -d --build
 
 # Conferir a migração aplicada nesta instalação
-cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.8}.json"
+cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.9}.json"
 
 # Diagnóstico automatizado
 set -a; . ./.env; set +a
@@ -329,7 +329,7 @@ Copie o bloco inteiro abaixo para uma IA com terminal no servidor Linux. Ele foi
 ```text
 Você é responsável por instalar, configurar, validar e documentar a stack pública
 Ruan0205/agent-zero-chatgpt-browser-stack em um servidor Linux. Instale SOMENTE a
-release suportada v2.12-stack.8. Trabalhe até que os testes aplicáveis terminem;
+release suportada v2.12-stack.9. Trabalhe até que os testes aplicáveis terminem;
 não considere "containers subiram" como validação suficiente. Não misture versões,
 nem replique Compose, volumes ou scripts de uma instalação anterior.
 
@@ -338,7 +338,7 @@ REGRAS DE SEGURANÇA E ESCOPO
    portas em uso, Docker/Compose, firewall e serviços existentes. Não pare nem remova
    aplicações alheias à stack.
 2. Clone `https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git` com
-   `--branch v2.12-stack.8 --depth 1`. Confirme `git describe --tags --exact-match`
+   `--branch v2.12-stack.9 --depth 1`. Confirme `git describe --tags --exact-match`
    e anote o SHA do commit. Não reutilize cookies, sessões, chats, bancos, arquivos
    `.env` ou credenciais de outra instalação. Não exporte integrações pessoais do
    servidor original; Nextcloud e projetos alheios não fazem parte desta stack.
@@ -361,7 +361,7 @@ INSTALAÇÃO
 1. Instale/verifique Docker Engine 24+, Compose v2, Git, curl e OpenSSL conforme a
    distribuição. Não use Docker-in-Docker.
 2. No clone fixado acima, execute `chmod +x scripts/*.sh` e `./scripts/setup.sh`.
-3. Preencha `.env`, mantendo `STACK_SCHEMA_VERSION=v2.12-stack.8` e `STACK_DATA_DIR`
+3. Preencha `.env`, mantendo `STACK_SCHEMA_VERSION=v2.12-stack.9` e `STACK_DATA_DIR`
    em disco com espaço suficiente. Confirme que `API_KEY_OTHER`, IP/DNS e telefone
    opcional não estão com exemplos. Use `HOST_ROOT_MOUNT=/` somente após ciência do
    proprietário. Não imprima `.env` em logs/relatório.
@@ -461,7 +461,7 @@ Este segundo prompt preserva dados de uma instalação existente e exige rollbac
 
 ```text
 Atualize uma instalação existente de Ruan0205/agent-zero-chatgpt-browser-stack para
-a release pública suportada v2.12-stack.8 sem perder chats, memórias, uploads,
+a release pública suportada v2.12-stack.9 sem perder chats, memórias, uploads,
 workspaces, configurações, sessões do ChatGPT/WhatsApp ou credenciais. Esta release
 substitui as antigas para uso normal; tags antigas servem apenas para rollback.
 Você tem autorização para reiniciar apenas os serviços desta stack. Não altere
@@ -482,9 +482,9 @@ CHECKPOINT E INVENTÁRIO — OBRIGATÓRIOS ANTES DA PRIMEIRA MUDANÇA
 ATUALIZAÇÃO
 1. Busque tags/releases e notas oficiais. Faça fetch sem apagar alterações. Crie branch de
    atualização e compare migrations, Dockerfiles, plugins, prompts e schema de settings.
-   Fixe `v2.12-stack.8`, registre o SHA e rejeite arquivos misturados de tags antigas.
+   Fixe `v2.12-stack.9`, registre o SHA e rejeite arquivos misturados de tags antigas.
 2. Mescle a release pública; mantenha segredos somente no `.env`; ajuste
-   `STACK_SCHEMA_VERSION=v2.12-stack.8` sem apagar outros valores; execute
+   `STACK_SCHEMA_VERSION=v2.12-stack.9` sem apagar outros valores; execute
    `docker compose config --quiet`; construa imagens antes da parada final.
 3. Recrie serviços em ordem de dependência. Aplique migrations idempotentes. Confirme que
    a correção v2.12 que copia arquivos oficiais ausentes para `/a0` permanece funcional.

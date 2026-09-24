@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.12-stack.9 — Agent Zero mais estável em tarefas longas
+
+- Preserva chats persistentes quando a API retoma uma conversa existente; somente
+  chats criados com TTL explícito podem expirar automaticamente.
+- Restringe **Nudge** a chats `chatgpt-browser` já parados, evitando interromper
+  uma chamada ativa e duplicar o envio.
+- Torna o Agent 0 um perfil geral para pesquisa, programação e administração,
+  desabilita perfis especializados no seed e adiciona instruções para testes
+  longos, buscas limitadas e validação de resultados.
+- Diferencia uma sessão de terminal realmente ativa de uma sessão já encerrada,
+  com limite finito de consultas de progresso e avisos preservados no bridge.
+- Divide prompts extensos em inserções verificadas no navegador, detecta turno
+  vazio concluído e não confunde texto de download dentro de código JSON com
+  um arquivo gerado.
+- Evita classificar um pedido de instalação de infraestrutura como geração de
+  mídia apenas por mencionar imagens ou arquivos nos requisitos.
+- Testes locais: 79 testes JavaScript, sintaxe Python e migração persistente.
+  Isso não substitui a validação ponta a ponta em outra instalação.
+
 ## v2.12-stack.8 — anexos por mensagem e upload de imagem com prazo
 
 - Mantém um chat do navegador por chat do Agent Zero e limita anexos à mensagem

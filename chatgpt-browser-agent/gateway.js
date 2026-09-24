@@ -12,6 +12,7 @@ const { ProviderCooldown } = require('./provider-cooldown');
 const { isProviderMessageLimit, retryProviderRejection } = require('./retry-policy');
 const { compactUtilityBody } = require('./utility-compactor');
 const { isImageUploadTimeout, imageUploadFailureAnswer, failedUploadChatUrl, uploadedAttachmentsForTurn } = require('./image-upload');
+const { isInfrastructureWorkflow } = require('./media-intent');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8000);
 const SCRIPT = process.env.CHATGPT_BROWSER_SCRIPT || path.join(__dirname, 'chatgpt.js');
@@ -297,6 +298,10 @@ function isNativeMediaRequest(body) {
   // media result is newer, this is only Agent Zero's post-tool closing turn.
   if(latestHumanIndex<0 || latestHumanIndex<latestMediaIndex) return false;
   const text=users.length ? bridge.extractedUserText(bridge.textContent(users.at(-1).content)) : '';
+  // A long setup/build request must run through Agent Zero's tools. Mentions
+  // of images, downloads or filenames inside requirements and prohibitions
+  // are not a request for ChatGPT to return a single native media artifact.
+  if(isInfrastructureWorkflow(text)) return false;
   // Feather generation is more reliable through Agent Zero's local Python
   // toolchain. The connected ChatGPT runtime otherwise tries to download
   // PyArrow through web search and can remain in visible processing until the
@@ -357,7 +362,9 @@ function protocolDebug(body) {
   return (body.messages||[]).filter(message=>message.role!=='system').slice(-8).map(message=>{
     const content=bridge.textContent(message.content);
     let keys=[]; try { const parsed=JSON.parse(content); keys=parsed&&typeof parsed==='object'?Object.keys(parsed).slice(0,12):[]; } catch {}
-    return {role:message.role,name:message.name||'',current:message.role==='user'&&bridge.isCurrentUserMessage(message),media:isExactMediaToolResult(message),keys,snippet:content.replace(/\s+/g,' ').slice(0,260)};
+    const userAt=content.lastIndexOf('"user_message"');
+    const toolAt=content.lastIndexOf('"tool_result"');
+    return {role:message.role,name:message.name||'',current:message.role==='user'&&bridge.isCurrentUserMessage(message),media:isExactMediaToolResult(message),keys,length:content.length,userAt,toolAt,boundary:userAt>=0?content.slice(Math.max(0,userAt-65),userAt+20).replace(/\s+/g,' '):'',snippet:content.replace(/\s+/g,' ').slice(0,260)};
   });
 }
 
@@ -693,7 +700,8 @@ const server = http.createServer(async (req, res) => {
         // One submission per attempt. A timeout is an inconclusive result,
         // not evidence that the provider rejected the user turn. Retrying a
         // timed-out but still-running turn used to duplicate user messages.
-        const runAttempt=(reloadBeforeAttempt=false) => runBrowser(slot,prompt,chatUrl,{
+        let promptToSend=prompt;
+        const runAttempt=(reloadBeforeAttempt=false) => runBrowser(slot,promptToSend,chatUrl,{
           reloadBeforeAttempt,
           timeoutMs:remainingBudget(),
           deadline:requestDeadline,
@@ -701,9 +709,10 @@ const server = http.createServer(async (req, res) => {
           expectedArtifact:nativeMedia?'':expectedArtifact,
           contextId,
         });
-        for(let rateAttempt=0;;rateAttempt++) {
+        let emptyRetry=0;
+        for(let rateAttempt=0;;) {
           try {
-            browserResult=await runAttempt(rateAttempt>0);
+            browserResult=await runAttempt(rateAttempt>0 || emptyRetry>0);
             break;
           } catch(error) {
             if(isImageUploadTimeout(error)) {
@@ -725,11 +734,25 @@ const server = http.createServer(async (req, res) => {
               }
               return JSON.stringify(imageUploadFailureAnswer());
             }
+            if(/ChatGPT completed an empty assistant turn/i.test(error.message)
+              && emptyRetry<1 && !nativeMedia && browserUploadPaths.length===0
+              && remainingBudget()>30_000) {
+              if(!chatUrl) chatUrl=requestChatUrlFromError(error);
+              if(!chatUrl) throw new Error('Empty-response recovery refused: the original ChatGPT chat URL is unknown');
+              emptyRetry++;
+              // The prior assistant turn has a final Copy action and no
+              // content. It cannot be an active generation. Retry only once
+              // in this same mapped chat, without replaying the long prompt.
+              promptToSend='The immediately preceding Agent Zero transport request received an empty completed assistant turn. Answer that same request now. Return exactly one complete Agent Zero JSON object inside one fenced json code block. Do not claim a tool ran unless its actual result was supplied in the transcript.';
+              console.warn('[empty-response] completed blank assistant turn; reloading and retrying once in the same conversation');
+              continue;
+            }
             if(!retryProviderRejection(error,rateAttempt,PROVIDER_429_RETRIES)) throw error;
             if(!chatUrl) chatUrl=requestChatUrlFromError(error);
             if(!chatUrl) throw new Error('Provider 429 retry refused: the current ChatGPT chat URL is unknown');
             console.warn(`[provider-429] attempt ${rateAttempt+1}/${PROVIDER_429_RETRIES} failed; waiting ${PROVIDER_429_RETRY_DELAY_MS}ms, then reloading the same chat and retrying`);
             await providerCooldown.wait();
+            rateAttempt++;
           }
         }
         if (/^main(?:[:]|$)/i.test(callScope) && chatHash) {
