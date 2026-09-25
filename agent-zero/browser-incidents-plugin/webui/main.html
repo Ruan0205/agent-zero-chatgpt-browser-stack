@@ -6,19 +6,22 @@
   .repair-title{font-size:15px;font-weight:750;margin-bottom:6px}
   .repair-help{color:#aebbd0;margin:0 0 10px}
   .repair-status{font-size:12px;color:#82b7ff;margin-bottom:8px}
+  .repair-current-error{white-space:pre-wrap;overflow-wrap:anywhere;color:#d9e7ff;border-left:3px solid #82b7ff;padding-left:10px;margin:8px 0}
   .repair-response{white-space:pre-wrap;overflow-wrap:anywhere;max-height:400px;overflow:auto;background:#0c1422;border-radius:10px;padding:12px;margin:8px 0;color:#eef3fb}
   .repair-error{white-space:pre-wrap;color:#ff9ca8}
   .repair-controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
   .repair-composer{width:100%;min-height:72px;box-sizing:border-box;background:#0d1624;border:1px solid #52627d;border-radius:10px;color:#fff;padding:10px;resize:vertical}
   .repair-controls button[hidden],.repair-panel [hidden]{display:none!important}
   .repair-vnc{color:#9bc4ff}
+  .incident-description{width:100%;min-height:78px;box-sizing:border-box;background:#0d1624;border:1px solid #52627d;border-radius:10px;color:#fff;padding:10px;resize:vertical;margin-bottom:10px}
 </style>
 <div class="browser-incidents-surface">
   <header class="incident-head"><div class="incident-logo"><span class="material-symbols-outlined">fact_check</span></div><div><div class="incident-title">Chats com erro</div><div class="incident-subtitle">Relatórios completos iniciados por você</div></div><div class="incident-actions"><button class="incident-icon-button incident-refresh" title="Atualizar"><span class="material-symbols-outlined">refresh</span></button><button class="incident-button incident-clear" title="Remover todos os relatórios">Limpar lista</button></div></header>
-  <div class="incident-manual"><p>Selecione o chat problemático. O reparador isolado analisará o histórico inteiro e só fará alterações após sua aprovação.</p><button class="incident-button incident-report-chat" type="button">Chat com erro</button><div class="incident-runtime" data-state="ready"><span class="incident-dot"></span><span class="incident-runtime-text">Reparador disponível</span></div></div>
+  <div class="incident-manual"><p>Selecione o chat e descreva o erro atual. O reparador verificará primeiro suas evidências, sem reabrir problemas antigos já resolvidos, e só fará alterações após sua aprovação.</p><textarea class="incident-description" required placeholder="Qual erro está acontecendo agora? Diga o sintoma, quando ocorreu e o resultado esperado."></textarea><button class="incident-button incident-report-chat" type="button">Chat com erro</button> <a class="repair-vnc" href="#" target="_blank" rel="noopener noreferrer">Abrir VNC do reparador</a><div class="incident-runtime" data-state="ready"><span class="incident-dot"></span><span class="incident-runtime-text">Reparador disponível</span></div></div>
   <section class="repair-panel" hidden>
     <div class="repair-title">Reparador isolado · <span class="repair-chat-name"></span></div>
     <p class="repair-help">Uma conversa própria no navegador e VNC separada. O diagnóstico é somente leitura; o reparo e a retomada exigem aprovações distintas.</p>
+    <div class="repair-current-error"></div>
     <div class="repair-status"></div><div class="repair-response"></div><div class="repair-error"></div>
     <textarea class="repair-composer" placeholder="Pergunte sobre o diagnóstico ou acrescente informações deste incidente…"></textarea>
     <div class="repair-controls">
@@ -26,7 +29,7 @@
       <button class="incident-button repair-approve" type="button" hidden>Autorizar reparo</button>
       <button class="incident-button repair-decline" type="button" hidden>Não reparar</button>
       <button class="incident-button repair-resume" type="button" hidden>Autorizar retomada do chat</button>
-      <a class="repair-vnc" target="_blank" rel="noopener noreferrer">Abrir VNC do reparador</a>
+      <a class="repair-vnc" href="#" target="_blank" rel="noopener noreferrer">Abrir VNC do reparador</a>
     </div>
   </section>
   <div class="incident-stats"><div class="incident-stat"><strong data-count="open">0</strong><span>Incidentes abertos</span></div><div class="incident-stat"><strong data-count="total">0</strong><span>Total registrado</span></div></div>

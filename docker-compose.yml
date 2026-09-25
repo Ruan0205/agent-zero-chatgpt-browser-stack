@@ -259,6 +259,7 @@ services:
     restart: unless-stopped
     environment:
       REPAIR_AGENT_API_TOKEN: ${REPAIR_AGENT_API_TOKEN:?configure REPAIR_AGENT_API_TOKEN in .env}
+      MAIN_AGENT_API_TOKEN: ${MAIN_AGENT_API_TOKEN:?configure MAIN_AGENT_API_TOKEN in .env}
       REPAIR_AGENT_URL: http://agent-zero-repair/api/api_message
       MAIN_AGENT_API_URL: http://agent-zero/api/api_message
       REPAIR_STATE_DIR: /data/incidents
@@ -296,6 +297,7 @@ services:
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
       A0_SET_agent_profile: agent0
+      A0_SET_mcp_server_token: ${MAIN_AGENT_API_TOKEN:?configure MAIN_AGENT_API_TOKEN in .env}
       A0_SET_chat_model_provider: other
       A0_SET_chat_model_name: ${DEFAULT_MODEL:-Blackfrost-AI/Qwen3.8-27B-ABLITERATED-BF16}
       A0_SET_chat_model_api_base: http://agent-zero-featherless-queue:8000/v1

@@ -38,20 +38,29 @@ class RepairControllerTest(unittest.TestCase):
             controller.ensure_services = lambda: None
             controller.stop_services = lambda: None
             try:
+                with self.assertRaisesRegex(ValueError, "Descreva o erro atual"):
+                    controller.action({"action": "diagnose_chat", "context_id": "source-1"})
                 controller.action({"action": "diagnose_chat", "context_id": "source-1",
-                                   "chat_name": "Teste", "interface_snapshot": {"alert": "erro"}})
+                                   "chat_name": "Teste", "error_description": "falha atual no anexo",
+                                   "interface_snapshot": {"alert": "erro"}})
                 self.wait_phase("source-1", "awaiting_approval")
                 self.assertEqual(controller.sessions()["source-1"]["context_id"], "repair-1")
                 self.assertEqual(len(seen), 1)
-                controller.action({"action": "diagnose_chat", "context_id": "source-1"})
+                controller.action({"action": "diagnose_chat", "context_id": "source-1",
+                                   "error_description": "falha atual no anexo"})
                 self.assertEqual(len(seen), 1)
+                controller.action({"action": "diagnose_chat", "context_id": "source-1",
+                                   "error_description": "erro novo no mesmo chat"})
+                self.wait_phase("source-1", "awaiting_approval")
+                self.assertEqual(seen[1][0], "repair-1")
                 controller.action({"action": "approve_repair", "context_id": "source-1"})
                 self.wait_phase("source-1", "repaired")
-                self.assertEqual(seen[1][0], "repair-1")
-                self.assertFalse((controller.CONTROL / "repair-1.approved").exists())
-                controller.action({"action": "diagnose_chat", "context_id": "source-1"})
-                self.wait_phase("source-1", "awaiting_approval")
                 self.assertEqual(seen[2][0], "repair-1")
+                self.assertFalse((controller.CONTROL / "repair-1.approved").exists())
+                controller.action({"action": "diagnose_chat", "context_id": "source-1",
+                                   "error_description": "o mesmo erro persiste"})
+                self.wait_phase("source-1", "awaiting_approval")
+                self.assertEqual(seen[3][0], "repair-1")
             finally:
                 controller.invoke = original
                 controller.ensure_services = original_ensure

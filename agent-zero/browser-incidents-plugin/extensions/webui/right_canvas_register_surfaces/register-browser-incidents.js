@@ -113,6 +113,7 @@ function render(root, state) {
   root.querySelector(".incident-runtime")?.setAttribute("data-state", active ? "busy" : "ready");
   const selectedId = chatsStore.getSelectedChatId();
   const repair = state.repair_sessions?.[selectedId];
+  for (const link of root.querySelectorAll(".repair-vnc")) link.dataset.port = String(state.repair_vnc_port || 50087);
   const repairPanel = root.querySelector(".repair-panel");
   if (repairPanel) repairPanel.hidden = !repair;
   if (repair) {
@@ -124,6 +125,7 @@ function render(root, state) {
       resumed: "Chat original retomado", error: "Falha no reparador", resume_error: "Falha ao retomar o chat",
     };
     text(root.querySelector(".repair-chat-name"), repair.chat_name || selectedId);
+    text(root.querySelector(".repair-current-error"), repair.error_description || "");
     text(root.querySelector(".repair-status"), labels[repair.phase] || repair.phase);
     text(root.querySelector(".repair-response"), repair.response || "Aguardando resposta do diagnóstico.");
     text(root.querySelector(".repair-error"), repair.error || "");
@@ -131,7 +133,6 @@ function render(root, state) {
     root.querySelector(".repair-decline").hidden = repair.phase !== "awaiting_approval";
     root.querySelector(".repair-resume").hidden = repair.phase !== "repaired";
     root.querySelector(".repair-send").disabled = ["diagnosing", "repairing", "answering", "resuming"].includes(repair.phase);
-    root.querySelector(".repair-vnc").href = `${location.protocol}//${location.hostname}:${state.repair_vnc_port || 50087}/vnc.html`;
   }
 
   const list = root.querySelector(".incident-list");
@@ -190,9 +191,12 @@ function wire(root) {
     try {
       const contextId = chatsStore.getSelectedChatId();
       if (!contextId) throw new Error("Selecione um chat antes de solicitar o relatório.");
+      const errorDescription = root.querySelector(".incident-description")?.value?.trim() || "";
+      if (!errorDescription) throw new Error("Descreva o erro atual antes de iniciar a análise.");
       const state = await api("diagnose_chat", {
         context_id: contextId,
         chat_name: chatsStore.displayName(chatsStore.getSelectedContext()),
+        error_description: errorDescription,
         interface_snapshot: interfaceSnapshot(),
       });
       render(root, state);
@@ -226,6 +230,27 @@ function wire(root) {
     if (!globalThis.confirm("Autorizar uma nova mensagem no chat original para continuar a tarefa?")) return;
     try { render(root, await api("resume_source", { context_id: chatsStore.getSelectedChatId() })); }
     catch (error) { text(root.querySelector(".repair-error"), error?.message || error); }
+  });
+  for (const link of root.querySelectorAll(".repair-vnc")) link.addEventListener("click", async (event) => {
+    event.preventDefault();
+    const popup = window.open("about:blank", "_blank");
+    try {
+      const response = await fetch("/plugins/_agent_monitor/webui/vnc-runtime.json", {cache:"no-store",credentials:"same-origin"});
+      if (!response.ok) throw new Error("Credencial automática da VNC indisponível.");
+      const config = await response.json();
+      if (!config.password) throw new Error("Credencial automática da VNC não configurada.");
+      const url = new URL(location.href);
+      url.port = link.dataset.port || "50087";
+      url.pathname = "/vnc.html";
+      url.search = "";
+      url.hash = "";
+      for (const [key,value] of Object.entries({autoconnect:"1",reconnect:"1",resize:"scale",password:config.password})) url.searchParams.set(key,value);
+      if (!popup) throw new Error("Permita a abertura da aba da VNC no navegador.");
+      popup.location.href = url.toString();
+    } catch (error) {
+      popup?.close();
+      text(root.querySelector(".repair-error"), error?.message || "Não foi possível abrir a VNC.");
+    }
   });
   root.querySelector(".incident-refresh")?.addEventListener("click", () => refresh(root));
   root.querySelector(".incident-clear")?.addEventListener("click", async () => render(root, await api("clear_all")));

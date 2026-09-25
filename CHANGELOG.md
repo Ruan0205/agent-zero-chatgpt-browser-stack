@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.12-stack.11 — foco no erro atual e anexos sem reenvio duplicado
+
+- Exige uma descrição do erro atual antes de iniciar o diagnóstico manual; consulta
+  evidências recentes primeiro, sem tentar corrigir problemas antigos já resolvidos.
+- O botão da VNC do reparador dentro do Agent Zero preenche a senha VNC
+  automaticamente, mantendo o endereço direto protegido.
+- Conserva o registro de uma imagem já enviada mesmo após múltiplas chamadas de
+  ferramentas ou compactação do turno, evitando o falso timeout no reenvio.
+- O controlador consulta o token efetivo da API principal quando ele foi gerado
+  em memória, para conseguir retomar o chat original após autorização.
+- Acrescenta token estável para instalações novas e migrações de `.env`.
+
 ## v2.12-stack.10 — reparador isolado e correções acumuladas
 
 - Adiciona controller, Agent Zero e VNC exclusivos para diagnóstico de chats com erro.

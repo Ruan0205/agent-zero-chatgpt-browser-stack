@@ -11,7 +11,7 @@ const { IncidentAuditor } = require('./incident-auditor');
 const { ProviderCooldown } = require('./provider-cooldown');
 const { isProviderMessageLimit, retryProviderRejection } = require('./retry-policy');
 const { compactUtilityBody } = require('./utility-compactor');
-const { isImageUploadTimeout, imageUploadFailureAnswer, failedUploadChatUrl, uploadedAttachmentsForTurn } = require('./image-upload');
+const { isImageUploadTimeout, imageUploadFailureAnswer, failedUploadChatUrl, uploadedAttachmentsForTurn, isSameActiveRequest } = require('./image-upload');
 const { isNativeMediaText } = require('./media-intent');
 const { planMultipartPrompt } = require('./multipart-prompt');
 
@@ -696,7 +696,12 @@ const server = http.createServer(async (req, res) => {
         const attachmentTurnId=bridge.attachmentTurnIdentity(body);
         const toolFollowup=latestActualUserIndex>=0 && requestMessages.slice(latestActualUserIndex+1).some(message=>message.role==='assistant' || (message.role==='user' && !bridge.isCurrentUserMessage(message)));
         const latestUserHash=latestActualUser ? bridge.messageHashes({messages:[latestActualUser]})[0] : null;
-        const alreadyUploaded=new Set(uploadedAttachmentsForTurn(transportState,attachmentTurnId,latestUserHash,toolFollowup));
+        const activeUserTextHash=latestUserText ? crypto.createHash('sha256').update(latestUserText).digest('hex') : '';
+        const activeUserOccurrence=latestUserText ? requestMessages.filter(message=>message.role==='user' && bridge.isCurrentUserMessage(message) && bridge.extractedUserText(bridge.textContent(message.content))===latestUserText).length : 0;
+        const sameActiveRequest=(!latestActualUser && Boolean(transportState?.activeUserTextHash))
+          || isSameActiveRequest(transportState,activeUserTextHash,activeUserOccurrence,toolFollowup);
+        const priorUploaded=uploadedAttachmentsForTurn(transportState,attachmentTurnId,latestUserHash,toolFollowup);
+        const alreadyUploaded=new Set(sameActiveRequest ? [...(transportState.uploadedAttachments||[]),...priorUploaded] : priorUploaded);
         const attachmentRefs=allAttachmentRefs.filter(ref=>!alreadyUploaded.has(ref));
         const uploadPaths=resolveAttachmentPaths(attachmentRefs);
         const browserUploadPaths=uploadPaths.filter(filePath=>!BROWSER_UI_UPLOAD_BLOCKED_EXTENSIONS.has(path.extname(filePath).toLowerCase()));
@@ -786,7 +791,9 @@ const server = http.createServer(async (req, res) => {
                     // A failed upload was never accepted by ChatGPT. Keep
                     // previously completed uploads, but permit an explicit
                     // future user turn to retry this same image.
-                    attachmentTurnId,uploadedAttachments:[...alreadyUploaded]};
+                    attachmentTurnId,uploadedAttachments:[...alreadyUploaded],
+                    activeUserTextHash:activeUserTextHash||transportState?.activeUserTextHash||'',
+                    activeUserOccurrence:activeUserOccurrence||transportState?.activeUserOccurrence||0};
                   saveJsonFile(stateFile,next);
                 }
               }
@@ -836,6 +843,8 @@ const server = http.createServer(async (req, res) => {
               toolsHash:bridge.toolsHash(body),
               attachmentIdentityVersion:2,
               attachmentTurnId,
+              activeUserTextHash:activeUserTextHash||transportState?.activeUserTextHash||'',
+              activeUserOccurrence:activeUserOccurrence||transportState?.activeUserOccurrence||0,
               uploadedAttachments:[...new Set([...alreadyUploaded,...allAttachmentRefs])],
             }),{mode:0o600});
           }

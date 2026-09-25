@@ -56,4 +56,13 @@ function uploadedAttachmentsForTurn(state, turnId, latestUserHash, toolFollowup=
   return [];
 }
 
-module.exports={imageUploadCount,imageUploadReady,imageUploadTimeoutMs,isImageUploadTimeout,imageUploadFailureAnswer,failedUploadChatUrl,uploadedAttachmentsForTurn};
+function isSameActiveRequest(state, userTextHash, occurrence, toolFollowup=false) {
+  if(!state?.activeUserTextHash || !userTextHash || state.activeUserTextHash!==userTextHash) return false;
+  // A model/tool round-trip can reserialize or compact the human envelope.
+  // Do not interpret its changed envelope hash as a new request. An explicit
+  // repeat of the same text, however, increments the human occurrence count.
+  if(toolFollowup) return true;
+  return occurrence>0 && state.activeUserOccurrence>0 && occurrence<=state.activeUserOccurrence;
+}
+
+module.exports={imageUploadCount,imageUploadReady,imageUploadTimeoutMs,isImageUploadTimeout,imageUploadFailureAnswer,failedUploadChatUrl,uploadedAttachmentsForTurn,isSameActiveRequest};

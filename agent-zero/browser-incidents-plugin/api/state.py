@@ -76,6 +76,7 @@ def _controller_action(action: str, input: dict):
     payload = {"action": action, "context_id": input.get("context_id", "")}
     if action == "diagnose_chat":
         payload["chat_name"] = input.get("chat_name", "")
+        payload["error_description"] = input.get("error_description", "")
         payload["interface_snapshot"] = input.get("interface_snapshot", {})
     elif action == "repair_message":
         payload["message"] = input.get("message", "")

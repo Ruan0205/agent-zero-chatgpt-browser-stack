@@ -2,7 +2,7 @@
 
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {imageUploadCount,imageUploadReady,imageUploadTimeoutMs,isImageUploadTimeout,imageUploadFailureAnswer,failedUploadChatUrl,uploadedAttachmentsForTurn}=require('./image-upload');
+const {imageUploadCount,imageUploadReady,imageUploadTimeoutMs,isImageUploadTimeout,imageUploadFailureAnswer,failedUploadChatUrl,uploadedAttachmentsForTurn,isSameActiveRequest}=require('./image-upload');
 const {attachmentInputs,attachmentTurnIdentity}=require('./bridge-core');
 
 test('only image attachments receive the image-specific wait',()=>{
@@ -78,4 +78,12 @@ test('a tool follow-up retains an uploaded image when Agent Zero removes transie
   assert.deepEqual(uploadedAttachmentsForTurn(state,attachmentTurnIdentity(later),null,false),[]);
   const pending=attachmentInputs(later).filter(path=>!uploadedAttachmentsForTurn(state,attachmentTurnIdentity(later),null,true).includes(path));
   assert.deepEqual(pending,[]);
+});
+
+test('a compacted active request retains its completed upload without attaching it twice',()=>{
+  const state={activeUserTextHash:'task-1',activeUserOccurrence:1,uploadedAttachments:['/a0/usr/uploads/a.png']};
+  assert.equal(isSameActiveRequest(state,'task-1',1,false),true);
+  assert.equal(isSameActiveRequest(state,'task-1',1,true),true);
+  assert.equal(isSameActiveRequest(state,'task-2',1,true),false);
+  assert.equal(isSameActiveRequest(state,'task-1',2,false),false);
 });

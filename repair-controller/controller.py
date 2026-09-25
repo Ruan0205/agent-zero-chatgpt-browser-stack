@@ -26,6 +26,7 @@ INPUTS = ROOT / "repair-inputs"
 CONTROL = Path(os.environ.get("REPAIR_CONTROL_DIR", "/repair-control"))
 CHATS = Path(os.environ.get("SOURCE_CHATS_DIR", "/source-chats"))
 TOKEN = os.environ.get("REPAIR_AGENT_API_TOKEN", "")
+MAIN_TOKEN = os.environ.get("MAIN_AGENT_API_TOKEN", "")
 REPAIR_URL = os.environ.get("REPAIR_AGENT_URL", "http://agent-zero-repair/api/api_message")
 MAIN_URL = os.environ.get("MAIN_AGENT_API_URL", "http://agent-zero/api/api_message")
 MAIN_SETTINGS = Path(os.environ.get("MAIN_SETTINGS_FILE", "/main-settings/settings.json"))
@@ -34,12 +35,12 @@ RUN_LOCK = threading.Lock()
 
 
 class DockerConnection(http.client.HTTPConnection):
-    def __init__(self):
-        super().__init__("localhost", timeout=15)
+    def __init__(self, timeout=15):
+        super().__init__("localhost", timeout=timeout)
 
     def connect(self):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(15)
+        self.sock.settimeout(self.timeout)
         self.sock.connect("/var/run/docker.sock")
 
 
@@ -53,6 +54,43 @@ def container_action(name, action):
         message = response.read().decode("utf-8", errors="replace")
         if response.status not in {204, 304}:
             raise RuntimeError(f"Docker {action} {name}: HTTP {response.status} {message[:300]}")
+    finally:
+        connection.close()
+
+
+def runtime_main_token():
+    """Read the main Agent Zero API token without logging or persisting it."""
+    command = [
+        "/opt/venv-a0/bin/python", "-c",
+        "import sys; sys.path.insert(0, '/a0'); "
+        "from helpers.settings import get_settings; "
+        "print(get_settings().get('mcp_server_token', ''))",
+    ]
+    headers = {"Content-Type": "application/json"}
+    connection = DockerConnection(timeout=120)
+    try:
+        connection.request("POST", "/v1.47/containers/agent-zero/exec",
+                           body=json.dumps({"AttachStdout": True, "AttachStderr": True,
+                                            "Tty": True, "Cmd": command}), headers=headers)
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        if response.status != 201 or not payload.get("Id"):
+            raise RuntimeError("Não foi possível consultar o token da API principal")
+        exec_id = payload["Id"]
+    finally:
+        connection.close()
+    connection = DockerConnection(timeout=120)
+    try:
+        connection.request("POST", f"/v1.47/exec/{exec_id}/start",
+                           body=json.dumps({"Detach": False, "Tty": True}), headers=headers)
+        response = connection.getresponse()
+        output = response.read().decode("utf-8", errors="replace").strip()
+        if response.status != 200:
+            raise RuntimeError("Falha ao consultar a API principal")
+        token = output.splitlines()[-1].strip() if output else ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", token):
+            raise RuntimeError("Token da API principal inválido")
+        return token
     finally:
         connection.close()
 
@@ -169,7 +207,7 @@ def stop_when_idle():
 
 def run_resume(source_id):
     try:
-        token = read_json(MAIN_SETTINGS, {}).get("mcp_server_token")
+        token = MAIN_TOKEN or read_json(MAIN_SETTINGS, {}).get("mcp_server_token") or runtime_main_token()
         if not token:
             raise RuntimeError("Token da API principal indisponível")
         result = invoke(MAIN_URL, token,
@@ -192,7 +230,12 @@ def action(payload):
     with LOCK:
         entry = sessions().get(source_id)
         if kind == "diagnose_chat":
-            if entry and entry.get("phase") in {"diagnosing", "answering", "repairing", "resuming", "awaiting_approval"}:
+            description = str(payload.get("error_description", "")).strip()
+            if not description or len(description) > 20_000:
+                raise ValueError("Descreva o erro atual (até 20.000 caracteres) antes da análise")
+            if entry and entry.get("phase") in {"diagnosing", "answering", "repairing", "resuming"}:
+                return entry
+            if entry and entry.get("phase") == "awaiting_approval" and entry.get("error_description") == description:
                 return entry
             if not (CHATS / source_id / "chat.json").is_file():
                 raise ValueError("Histórico completo do chat não encontrado")
@@ -201,13 +244,18 @@ def action(payload):
             write_json(INPUTS / snapshot_name, payload.get("interface_snapshot", {}))
             change(source_id, chat_name=str(payload.get("chat_name", source_id))[:300],
                    phase="diagnosing", context_id=(entry or {}).get("context_id", ""),
-                   response="", error="", snapshot=snapshot_name)
+                   response="", error="", snapshot=snapshot_name,
+                   error_description=description)
             message = (
-                "Diagnostique em modo SOMENTE LEITURA. Leia integralmente "
-                f"/source-chats/{source_id}/chat.json e "
-                f"/repair-inputs/repair-inputs/{snapshot_name}. Percorra os documentos por partes "
-                "se forem grandes. Identifique evidências, causa raiz e correção persistente "
-                "para todos os chats. Não faça modificações neste turno; pergunte se autorizo o reparo."
+                "Diagnostique em modo SOMENTE LEITURA o erro ATUAL descrito pelo usuário: "
+                f"{json.dumps(description, ensure_ascii=False)}. "
+                f"Consulte /repair-inputs/repair-inputs/{snapshot_name} e procure no histórico "
+                f"/source-chats/{source_id}/chat.json apenas os trechos relevantes a este sintoma, "
+                "priorizando eventos recentes e os registros contemporâneos do erro. "
+                "Não reabra nem tente reparar problemas antigos já resolvidos. "
+                "Aumente o escopo da leitura somente quando necessário para confirmar a causa. "
+                "Identifique evidências, causa raiz e correção persistente para todos os chats. "
+                "Não faça modificações neste turno; pergunte se autorizo o reparo."
             )
             launch(run_repair, source_id, (entry or {}).get("context_id", ""), message, "diagnosing")
             return sessions()[source_id]
