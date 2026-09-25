@@ -1,0 +1,5 @@
+name: _repair_guard
+title: Repair authorization gate
+description: Prevent repair tools from running until the user approves a specific diagnostic chat.
+version: 1.0.0
+always_enabled: true

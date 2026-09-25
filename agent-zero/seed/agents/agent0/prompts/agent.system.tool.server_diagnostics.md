@@ -1,0 +1,2 @@
+### server_diagnostics
+One read-only host snapshot; no arguments. Returns top processes/CPU/RAM, memory and disk totals, listening ports, running Docker containers, recent host errors and short logs for unhealthy containers. It does not stop, restart or modify anything. Use it to investigate the server before proposing changes. Any modification still requires a separate explicit user request and an appropriate execution tool.

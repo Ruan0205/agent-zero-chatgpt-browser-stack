@@ -16,6 +16,15 @@ test('empty prompt has no chunks and invalid sizes are refused',()=>{
   assert.throws(()=>composerChunks('abc',1));
 });
 
+test('escaped newlines are not split across composer input events',()=>{
+  const prompt='a'.repeat(1018)+'campo\\n  `message` and more text';
+  const chunks=composerChunks(prompt,1024);
+  assert.equal(chunks.join(''),prompt);
+  assert.ok(chunks.every(chunk=>chunk.length<=1024));
+  assert.ok(chunks.every((chunk,index)=>index===chunks.length-1 || !chunk.endsWith('\\')));
+  assert.deepEqual(composerChunks('\\🎮',2),['\\','🎮']);
+});
+
 test('contenteditable NBSP is equivalent to a boundary space but missing text is not',()=>{
   assert.equal(normalizeComposerText('segment\u00a0already present'),normalizeComposerText('segment already present'));
   assert.notEqual(normalizeComposerText('segment already'),normalizeComposerText('segment already present'));

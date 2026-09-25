@@ -1,0 +1,13 @@
+<style>
+  .chat-usage-control { display:flex;align-items:center;gap:7px;margin-right:8px;color:var(--color-text-secondary,#a9b4c2);font:600 12px/1 system-ui,sans-serif;white-space:nowrap; }
+  .chat-usage-count { display:flex;align-items:center;gap:5px;padding:7px 9px;border:1px solid var(--color-border,#414853);border-radius:9px;background:#ffffff09; }
+  .chat-usage-label { opacity:.75;font-weight:500; }
+  .chat-usage-sound { border:1px solid var(--color-border,#414853);background:#ffffff09;color:inherit;border-radius:9px;padding:6px 8px;cursor:pointer; }
+  .chat-usage-sound:hover { background:#ffffff18; }
+</style>
+<div class="chat-usage-control" x-data x-show="$store.chats?.selectedContext?.id"
+  :title="$store.chats?.selectedContext?.chat_token_usage ? ('Total: ' + Number($store.chats.selectedContext.chat_token_usage.total || 0).toLocaleString('pt-BR') + ' tokens em ' + Number($store.chats.selectedContext.chat_token_usage.calls || 0).toLocaleString('pt-BR') + ' chamadas desde a ativação.' + ($store.chats.selectedContext.chat_token_usage.estimated ? ' Contagem estimada; não é faturamento.' : ' Contagem informada pelo provedor.')) : 'A contagem começa na primeira chamada do modelo após esta atualização.'">
+  <span class="chat-usage-count"><span class="chat-usage-label">Entrada</span><span x-text="$store.chats?.selectedContext?.chat_token_usage ? (($store.chats.selectedContext.chat_token_usage.estimated ? '≈' : '') + Number($store.chats.selectedContext.chat_token_usage.input || 0).toLocaleString('pt-BR')) : '—'"></span></span>
+  <span class="chat-usage-count"><span class="chat-usage-label">Saída</span><span x-text="$store.chats?.selectedContext?.chat_token_usage ? (($store.chats.selectedContext.chat_token_usage.estimated ? '≈' : '') + Number($store.chats.selectedContext.chat_token_usage.output || 0).toLocaleString('pt-BR')) : '—'"></span></span>
+  <button class="chat-usage-sound" type="button" title="Ativar ou desativar som da resposta final" aria-label="Alternar som da resposta final"></button>
+</div>

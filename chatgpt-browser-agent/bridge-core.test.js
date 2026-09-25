@@ -20,6 +20,25 @@ test('mapped browser chat bounds a long appended tool result for its smaller com
  assert.ok(prompt.includes('tool_result compacted by transport'));
  assert.ok(prompt.includes('original_chars=18000'));
 });
+test('mapped tool follow-up repeats only the active user task as an anchor',()=>{
+ const previous=body([{role:'user',content:'{"user_message":"Show Python version and working directory only."}'}]);
+ const next=body([...previous.messages.slice(1),
+  {role:'assistant',content:'{"tool_name":"code_execution_tool"}'},
+  {role:'user',name:'tool',content:'{"tool_name":"code_execution_tool","tool_result":"Python 3.13\\n/a0/usr/workdir"}'}]);
+ const prompt=buildPrompt(next,180000,null,{messageHashes:messageHashes(previous)},{browserOwnsHistory:true,callScope:'main:0',activeUserText:'Show Python version and working directory only.'});
+ assert.ok(prompt.includes('ACTIVE USER REQUEST'));
+ assert.ok(prompt.includes('Show Python version and working directory only.'));
+ assert.ok(prompt.includes('Do not add requirements, files, or actions absent from this request'));
+ assert.ok(prompt.length<=6500,`unexpected prompt length ${prompt.length}`);
+});
+test('fresh browser catalog retains tools documented with colon headings and memory bullets',()=>{
+ const catalog={messages:[{role:'system',content:'# Agent Zero System Manual\n## available tools\n### input:\nsend keys\n## memory tools\n- `memory_load`: search saved memories\n- `memory_save`: save durable information\n- `memory_delete`: remove exact IDs\n- `memory_forget`: remove matching memories\n### response:\nfinish the task\n### meta_ai_image\nMeta AI image generation is intentionally disabled for browser transport'},
+  {role:'user',content:'{"user_message":"Hello"}'}]};
+ const prompt=buildPrompt(catalog,180000,null,null,{browserOwnsHistory:true,callScope:'main:0'});
+ for(const name of ['input','memory_load','memory_save','memory_delete','memory_forget','response'])
+  assert.ok(prompt.includes(`### ${name}`),`missing ${name}`);
+ assert.ok(!prompt.includes('### meta_ai_image'));
+});
 test('mapped chat separates a fresh user request appended to a long tool result',()=>{
  const previous=body([{role:'user',content:'{"user_message":"prepare a stack"}'}]);
  const mixed=JSON.stringify({tool_name:'code_execution_tool',tool_result:'x'.repeat(18000)})+' {"user_message":"Continue de onde parou."}';
@@ -66,6 +85,19 @@ test('image inputs are represented and local media is extracted',()=>{
  const b=body([{role:'user',content:[{type:'text',text:'describe'},{type:'image_url',image_url:{url:'/a0/usr/uploads/x.png'}}]}]);
  assert.ok(buildPrompt(b).includes('Attached image'));
  assert.deepEqual(attachmentInputs(b),['/a0/usr/uploads/x.png']);
+});
+test('new tool image references are uploaded without replaying older tool images',()=>{
+ const marker=path=>`[A0_BROWSER_ATTACHMENTS_JSON] ${JSON.stringify([path])}\n[Attached image file: ${path}]`;
+ const b=body([
+  {role:'user',content:JSON.stringify({user_message:'Analyze the render',attachments:['/a0/usr/uploads/original.png']})},
+  {role:'user',content:JSON.stringify({tool_name:'vision_load',tool_result:marker('/a0/usr/uploads/old.png')})},
+  {role:'user',content:JSON.stringify({tool_name:'vision_load',tool_result:marker('/a0/usr/uploads/current.png')})},
+ ]);
+ assert.deepEqual(attachmentInputs(b),['/a0/usr/uploads/original.png','/a0/usr/uploads/current.png']);
+});
+test('attachment extraction has no arbitrary count cap',()=>{
+ const paths=Array.from({length:25},(_,i)=>`/a0/usr/uploads/${i}.png`);
+ assert.deepEqual(attachmentInputs(body([{role:'user',content:JSON.stringify({user_message:'Review',attachments:paths})}])),paths);
 });
 test('attachments embedded in Agent Zero Human transcript are extracted',()=>{
  const b=body([{role:'user',content:'Human: {"user_message":"read","attachments":["/a0/usr/uploads/a.pdf","/a0/usr/uploads/b.zip"]}'}]);
@@ -183,6 +215,19 @@ test('operational response allowed after real tool result',()=>{
  assert.doesNotThrow(()=>validateAnswer(s,b));
 });
 
+test('file editing and VS Code terminal do not force a second shell tool',()=>{
+ const b=body([
+  {role:'user',content:JSON.stringify({user_message:'Crie um arquivo no editor de texto, abra no VS Code e leia no terminal integrado do VS Code.'})},
+  {role:'assistant',content:'{"tool_name":"text_editor","tool_args":{"action":"create"}}'},
+  {role:'user',content:'{"tool_result":"arquivo criado"}'},
+  {role:'assistant',content:'{"tool_name":"vscode","tool_args":{"action":"terminal","command":"cat hello.html"}}'},
+  {role:'user',content:'{"tool_result":"conteúdo lido"}'}
+ ]);
+ assert.deepEqual(operationalActionContext(b).requiredTools,[]);
+ const s=JSON.stringify({thoughts:[],headline:'done',tool_name:'response',tool_args:{text:'Arquivo criado e verificado no VS Code.'}});
+ assert.doesNotThrow(()=>validateAnswer(s,b));
+});
+
 test('last embedded user_message wins over stale browser request',()=>{
  const wrapped='[PROTOCOL] history {"user_message":"abra um blog no navegador"} current {"user_message":"Execute code_execution_tool no servidor"} [EXTRAS]';
  assert.equal(extractedUserText(wrapped),'Execute code_execution_tool no servidor');
@@ -219,7 +264,7 @@ test('fresh user envelope concatenated after tool result remains current',()=>{
  assert.equal(extractedUserText(merged),'crie e entregue arquivo validacao-84.iso como anexo baixável');
  const intent=operationalActionContext(body([message]));
  assert.equal(intent.requested,true);
- assert.deepEqual(intent.requiredTools,['code_execution_tool','chatgpt_browser_media']);
+ assert.deepEqual(intent.requiredTools,['chatgpt_browser_media']);
 });
 
 test('failed media result followed by a fresh user envelope remains current',()=>{
@@ -295,6 +340,15 @@ test('first browser-owned agent call uses lean tool catalog and preserves latest
  assert.ok(p.length<64000);
 });
 
+test('fresh subordinate keeps its request and concise tool catalog in one browser-editor turn',()=>{
+ const hugeSystem={role:'system',content:'# Behavioral rules\nPortuguês\n# Agent Zero System Manual\n'+('RULE '.repeat(9000))+'\n## available tools\n'+Array.from({length:35},(_,i)=>`### tool_${i}\nargs: value\n${'DOC '.repeat(1200)}`).join('\n')};
+ const b={messages:[hugeSystem,{role:'user',content:'{"user_message":"AVALIE_CICLO_3"}'}]};
+ const p=buildPrompt(b,180000,new Set(),null,{browserOwnsHistory:true,callScope:'main:1'});
+ assert.ok(p.includes('AVALIE_CICLO_3'));
+ assert.ok(p.includes('compact transport catalog'));
+ assert.ok(p.length<12000,`subordinate first turn unexpectedly needs multipart: ${p.length}`);
+});
+
 test('internal UI attachment marker is uploaded and removed from visible user text',()=>{
  const content='```json\n'+JSON.stringify({
   user_message:'Leia o arquivo.\n[A0_BROWSER_ATTACHMENTS_JSON]["/a0/usr/uploads/entrada-01.png"]'
@@ -323,6 +377,16 @@ test('input-file analysis with explicit no-return clause does not require media 
  const request='Abra o anexo real entrada-09.xls, valide o arquivo e responda JSON. Não crie, edite nem devolva arquivos neste teste.';
  const intent=operationalActionContext(body([{role:'user',content:JSON.stringify({user_message:request})}]));
  assert.ok(!intent.requiredTools.includes('chatgpt_browser_media'));
+});
+
+test('verifying an existing attachment does not demand a second publication',()=>{
+  const b={messages:[{role:'user',content:'Verifique o anexo já publicado no caminho /a0/usr/uploads/prova-artifact.txt. Informe exists, sha256, openable e published_in_chat. Não gere outro arquivo.'}]};
+  assert.ok(!operationalActionContext(b).requiredTools.includes('chatgpt_browser_media'));
+});
+
+test('read-only server diagnostics does not force a terminal command',()=>{
+  const b={messages:[{role:'user',content:'Faça diagnóstico somente leitura do servidor: memória, CPU, containers e erros. Não execute comandos adicionais.'}]};
+  assert.ok(!operationalActionContext(b).requiredTools.includes('code_execution_tool'));
 });
 
 test('completed terminal session is explicit even when its large output is compacted',()=>{

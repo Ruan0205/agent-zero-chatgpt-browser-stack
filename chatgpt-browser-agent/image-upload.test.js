@@ -65,3 +65,17 @@ test('a successful image upload is not repeated after a tool response',()=>{
   const pathsToUpload=attachmentInputs(later).filter(ref=>!alreadyUploaded.has(ref));
   assert.deepEqual(pathsToUpload,[]);
 });
+
+test('a tool follow-up retains an uploaded image when Agent Zero removes transient EXTRAS',()=>{
+  const ref='/a0/usr/uploads/screenshot.png';
+  const original={role:'user',content:JSON.stringify({user_message:'Inspect screenshot',attachments:[ref]})+' [EXTRAS] {"current_datetime":"now"}'};
+  const normalized={role:'user',content:JSON.stringify({user_message:'Inspect screenshot',attachments:[ref]})};
+  const first={messages:[original]};
+  const later={messages:[normalized,{role:'assistant',content:'{"tool_name":"code_execution_tool"}'},{role:'user',content:'{"tool_result":"done"}'}]};
+  const state={attachmentIdentityVersion:2,attachmentTurnId:attachmentTurnIdentity(first),uploadedAttachments:[ref]};
+  assert.notEqual(attachmentTurnIdentity(first),attachmentTurnIdentity(later));
+  assert.deepEqual(uploadedAttachmentsForTurn(state,attachmentTurnIdentity(later),null,true),[ref]);
+  assert.deepEqual(uploadedAttachmentsForTurn(state,attachmentTurnIdentity(later),null,false),[]);
+  const pending=attachmentInputs(later).filter(path=>!uploadedAttachmentsForTurn(state,attachmentTurnIdentity(later),null,true).includes(path));
+  assert.deepEqual(pending,[]);
+});

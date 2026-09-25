@@ -8,4 +8,4 @@ Exception for a file you have already created and validated with an Agent Zero e
 
 For one file, `file_path` (or `path`) is accepted as an equivalent alias. `action: "upload"` is optional and does not change access permissions.
 
-Only paths inside `/a0/usr/workdir` or the current chat's `/workspace/chats/<context>/chatgpt-files` are accepted. Local publication supports files up to 1 GiB. Never paste a large file as base64 into a model response. After this tool returns, close the turn with the normal `response` tool.
+Only paths inside `/a0/usr/workdir`, the current chat's `/workspace/chats/<context>/chatgpt-files` or `/workspace/chats/<context>/images`, or the current chat's `/a0/usr/chats/<context>/images` are accepted. These are the same chat's files, not files from another chat. Never paste a large file as base64 into a model response. After this tool returns, close the turn with the normal `response` tool.

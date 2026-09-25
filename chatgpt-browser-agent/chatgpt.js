@@ -138,7 +138,6 @@ function buildFullPrompt({ userPrompt, stdinData, fileData, gitData, contextData
 async function uploadFilesToChatGPT(page, uploadPaths, log) {
   const paths=[...new Set((uploadPaths||[]).filter(Boolean).map(p=>path.resolve(p)))];
   if(!paths.length) return;
-  if(paths.length>20) throw new Error('At most 20 attachments may be uploaded in one request');
   for(const abs of paths) if (!fs.existsSync(abs)) throw new Error(`Upload file not found: ${abs}`);
   log(`Uploading ${paths.length} file(s): ${paths.map(p=>path.basename(p)).join(', ')}`);
 
@@ -258,12 +257,65 @@ async function waitForImageUploads(page, count, contextId, deadline, log) {
   throw new Error('IMAGE_UPLOAD_TIMEOUT: a imagem não carregou');
 }
 
+async function streamBrowserArtifact(page, url, target) {
+  const metadata=await page.evaluate(async source=>{
+    const response=await fetch(source,{credentials:'include'});
+    if(!response.ok || !response.body) throw new Error(`artifact fetch HTTP ${response.status}`);
+    window.__a0ArtifactReader=response.body.getReader();
+    return {mime:(response.headers.get('content-type')||'application/octet-stream').split(';')[0]};
+  },url);
+  const descriptor=fs.openSync(target,'w',0o600);
+  let bytes=0;
+  try {
+    for(;;) {
+      const encoded=await page.evaluate(async()=>{
+        const pieces=[];
+        let total=0;
+        while(total<256*1024) {
+          const {value,done}=await window.__a0ArtifactReader.read();
+          if(done) break;
+          pieces.push(value);
+          total+=value.length;
+        }
+        if(!total) return null;
+        const joined=new Uint8Array(total);
+        let offset=0;
+        for(const piece of pieces) { joined.set(piece,offset); offset+=piece.length; }
+        let binary='';
+        for(let i=0;i<joined.length;i+=0x8000)
+          binary+=String.fromCharCode(...joined.subarray(i,i+0x8000));
+        return btoa(binary);
+      });
+      if(encoded===null) break;
+      const chunk=Buffer.from(encoded,'base64');
+      let offset=0;
+      while(offset<chunk.length) {
+        const written=fs.writeSync(descriptor,chunk,offset,chunk.length-offset);
+        if(written<=0) throw new Error('artifact stream stopped writing');
+        offset+=written;
+      }
+      bytes+=chunk.length;
+    }
+  } catch(error) {
+    fs.closeSync(descriptor);
+    fs.rmSync(target,{force:true});
+    await page.evaluate(()=>{ window.__a0ArtifactReader?.cancel(); delete window.__a0ArtifactReader; }).catch(()=>{});
+    throw error;
+  }
+  fs.closeSync(descriptor);
+  await page.evaluate(()=>{ delete window.__a0ArtifactReader; }).catch(()=>{});
+  if(!bytes) { fs.rmSync(target,{force:true}); throw new Error('empty artifact response'); }
+  return {...metadata,bytes};
+}
+
 async function collectAssistantArtifacts(page, log, responseTurnId=null) {
   // Keep this list aligned with every artifact type the Agent Zero bridge is
   // expected to return. ChatGPT often renders generated files as buttons
   // whose only useful signal is the filename, rather than as normal links.
   const downloadableExtensionPattern='\\.(?:png|jpe?g|webp|gif|pdf|docx?|xlsx?|xls|pptx?|csv|tsv|txt|md|json|xml|ya?ml|html?|svg|py|js|ts|jsx|tsx|java|c|cpp|h|hpp|cs|go|rs|php|rb|sh|ps1|bat|sql|css|toml|ini|cfg|conf|log|ipynb|zip|7z|rar|tar|tar\\.gz|tgz|gz|bz2|xz|sqlite|db|parquet|feather|npy|npz|h5|hdf5|mat|stl|obj|ply|gltf|glb|dae|dxf|wav|mp3|flac|ogg|opus|aac|mp4|mov|mkv|avi|webm|iso|bin|exe|dll|so|apk|jar)\\b';
-  const found=await page.evaluate(async (targetTurnId) => {
+  const downloadDir=path.join(STATE_DIR,`downloads-${crypto.randomUUID()}`);
+  fs.mkdirSync(downloadDir,{recursive:true,mode:0o700});
+  const candidates=await page.evaluate((targetTurnId) => {
     const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]'));
     const assistant=[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
     const root=(targetTurnId ? document.querySelector(`[data-testid="${CSS.escape(targetTurnId)}"]`) : null)
@@ -272,37 +324,30 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
       || (!targetTurnId ? assistant : null);
     if(!root) return [];
     const candidates=[];
-    for(const a of root.querySelectorAll('a[href]')) {
-      const href=a.href;
-      const label=(a.getAttribute('download')||a.textContent||'').trim();
-      if(a.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(href)) candidates.push({url:href,name:label});
-    }
+    // File links use Chromium's disk-backed download below. Fetching an
+    // archive into this page would allocate the entire file twice before the
+    // provider's download control gets a chance to stream it to disk.
     for(const img of root.querySelectorAll('img[src]')) {
       const r=img.getBoundingClientRect();
       if((img.naturalWidth||r.width)<128 || (img.naturalHeight||r.height)<128) continue;
       if(/avatar|profile|emoji|icon/i.test(`${img.alt||''} ${img.className||''}`)) continue;
       candidates.push({url:img.currentSrc||img.src,name:img.alt||''});
     }
-    const out=[];
     const seen=new Set();
-    for(const candidate of candidates) {
-      if(!candidate.url || seen.has(candidate.url)) continue;
+    return candidates.filter(candidate=>{
+      if(!candidate.url || seen.has(candidate.url)) return false;
       seen.add(candidate.url);
-      try {
-        const response=await fetch(candidate.url,{credentials:'include'});
-        if(!response.ok) continue;
-        const buffer=await response.arrayBuffer();
-        if(!buffer.byteLength || buffer.byteLength>100*1024*1024) continue;
-        const bytes=new Uint8Array(buffer);
-        let binary='';
-        for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
-        out.push({data:btoa(binary),mime:(response.headers.get('content-type')||'application/octet-stream').split(';')[0],name:candidate.name,url:candidate.url});
-      } catch {}
-    }
-    return out;
+      return true;
+    });
   },responseTurnId);
-  const downloadDir=path.join(STATE_DIR,`downloads-${crypto.randomUUID()}`);
-  fs.mkdirSync(downloadDir,{recursive:true,mode:0o700});
+  const found=[];
+  for(const candidate of candidates) {
+    const target=path.join(downloadDir,`image-${crypto.randomUUID()}`);
+    try {
+      const captured=await streamBrowserArtifact(page,candidate.url,target);
+      found.push({path:target,mime:captured.mime,name:candidate.name,url:candidate.url});
+    } catch(error) { log(`Image artifact fetch skipped: ${error.message}`); }
+  }
   let client=null;
   try {
     client=await page.target().createCDPSession();
@@ -327,16 +372,8 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
         item.mimeType=event.response?.mimeType||'';
       }
     });
-    client.on('Network.loadingFinished',async event=>{
-      const item=networkEvents.find(candidate=>candidate.requestId===event.requestId);
-      if(!item||(!item.url.includes('/interpreter/download?')&&!item.url.includes('/simple?'))) return;
-      try {
-        const body=await client.send('Network.getResponseBody',{requestId:event.requestId});
-        item.responseBody=body.body;
-        item.responseBase64=Boolean(body.base64Encoded);
-        log(`Captured artifact metadata (${item.url.includes('/simple?')?'simple':'interpreter'}): ${String(body.body).slice(0,2000)}`);
-      } catch(error) { log(`Artifact metadata capture warning: ${error.message}`); }
-    });
+    // Do not call Network.getResponseBody here. CDP materializes the whole
+    // response in RAM, which is unsafe for a large generated artifact.
     const roots=responseTurnId
       ? [await page.$(`[data-testid="${responseTurnId.replace(/[^A-Za-z0-9_-]/g,'')}"]`)].filter(Boolean)
       : await page.$$('[data-testid^="conversation-turn-"]');
@@ -414,7 +451,7 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
         }
       }
       buttons.sort((a,b)=>a.priority-b.priority);
-      for(const entry of buttons.slice(0,20)) {
+      for(const entry of buttons) {
         const button=entry.element;
         const buttonLabel=await button.evaluate(el=>`${el.getAttribute('aria-label')||''} ${el.getAttribute('download')||''} ${el.innerText||el.textContent||''} ${el.getAttribute('href')||''}`.trim().slice(0,500)).catch(()=>'<unreadable>');
         const buttonDetails=await button.evaluate(el=>({
@@ -461,14 +498,14 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
             .find(event=>/\/backend-api\/estuary\/content\?/i.test(event.url));
           if(triggeredEstuary) {
             try {
-              const responseBody=await client.send('Network.getResponseBody',{requestId:triggeredEstuary.requestId});
-              const buffer=responseBody.base64Encoded ? Buffer.from(responseBody.body,'base64') : Buffer.from(responseBody.body);
-              if((!triggeredEstuary.status||triggeredEstuary.status<400)&&buffer.length) {
+              if(!triggeredEstuary.status||triggeredEstuary.status<400) {
                 const parsed=new URL(triggeredEstuary.url);
                 const recoveredName=parsed.searchParams.get('fn')||buttonLabel.replace(/^.*?Download\s+/i,'').trim();
-                const mime=triggeredEstuary.mimeType||'application/octet-stream';
-                found.push({data:buffer.toString('base64'),mime,name:recoveredName,url:triggeredEstuary.url});
-                log(`Collected Chromium Estuary response: ${recoveredName} (${buffer.length} bytes; HTTP ${triggeredEstuary.status||'unknown'}; ${mime})`);
+                const target=path.join(downloadDir,`estuary-${crypto.randomUUID()}`);
+                const captured=await streamBrowserArtifact(page,triggeredEstuary.url,target);
+                const mime=triggeredEstuary.mimeType||captured.mime;
+                found.push({path:target,mime,name:recoveredName,url:triggeredEstuary.url});
+                log(`Collected Chromium Estuary response: ${recoveredName} (${captured.bytes} bytes; HTTP ${triggeredEstuary.status||'unknown'}; ${mime})`);
                 if(page.url().startsWith('chrome-error://')&&fs.existsSync(SESSION_FILE)) {
                   const restore=fs.readFileSync(SESSION_FILE,'utf8').trim();
                   await page.goto(restore,{waitUntil:'domcontentloaded',timeout:60_000}).catch(()=>{});
@@ -485,32 +522,27 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
           // button. Copy the exact bytes shown in that active preview using the
           // browser session's credentials. This preserves the provider output
           // byte-for-byte instead of taking a screenshot or re-encoding it.
-          const previewImage=await page.evaluate(async exactName=>{
+          const previewImage=await page.evaluate(exactName=>{
             const dialogs=[...document.querySelectorAll('[role="dialog"],dialog,[aria-modal="true"]')]
               .filter(el=>Boolean(el.offsetWidth||el.offsetHeight||el.getClientRects().length)).reverse();
             for(const dialog of dialogs) {
               const images=[...dialog.querySelectorAll('img[src]')];
               const image=images.find(img=>(img.alt||'').trim()===exactName)||images.at(-1);
               if(!image?.src) continue;
-              try {
-                const response=await fetch(image.currentSrc||image.src,{credentials:'include'});
-                if(!response.ok) continue;
-                const buffer=await response.arrayBuffer();
-                if(!buffer.byteLength||buffer.byteLength>100*1024*1024) continue;
-                const bytes=new Uint8Array(buffer); let binary='';
-                for(let i=0;i<bytes.length;i+=0x8000) binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
-                return {data:btoa(binary),mime:(response.headers.get('content-type')||'application/octet-stream').split(';')[0],
-                  name:exactName.replace(/^Download\s+/i,''),url:image.currentSrc||image.src,size:buffer.byteLength};
-              } catch {}
+              return {name:exactName.replace(/^Download\s+/i,''),url:image.currentSrc||image.src};
             }
             return null;
           },buttonLabel.trim()).catch(()=>null);
           if(previewImage) {
-            found.push(previewImage);
-            log(`Collected authenticated preview image: ${previewImage.name} (${previewImage.size} bytes; ${previewImage.mime})`);
-            await page.keyboard.press('Escape').catch(()=>{});
-            await page.evaluate(token=>document.querySelector(`[data-a0-download-source="${CSS.escape(token)}"]`)?.removeAttribute('data-a0-download-source'),sourceToken).catch(()=>{});
-            break;
+            const target=path.join(downloadDir,`preview-${crypto.randomUUID()}`);
+            try {
+              const captured=await streamBrowserArtifact(page,previewImage.url,target);
+              found.push({path:target,mime:captured.mime,name:previewImage.name,url:previewImage.url});
+              log(`Collected authenticated preview image: ${previewImage.name} (${captured.bytes} bytes; ${captured.mime})`);
+              await page.keyboard.press('Escape').catch(()=>{});
+              await page.evaluate(token=>document.querySelector(`[data-a0-download-source="${CSS.escape(token)}"]`)?.removeAttribute('data-a0-download-source'),sourceToken).catch(()=>{});
+              break;
+            } catch(error) { log(`Authenticated preview stream warning: ${error.message}`); }
           }
 
           // Generated-file pills can open a preview dialog instead of directly
@@ -629,11 +661,11 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
           }
         }
         if(saved) {
-          const buffer=fs.readFileSync(path.join(downloadDir,saved));
+          const sourcePath=path.join(downloadDir,saved);
           const ext=path.extname(saved).toLowerCase();
           const mime={'.pdf':'application/pdf','.zip':'application/zip','.txt':'text/plain','.json':'application/json','.csv':'text/csv'}[ext]||'application/octet-stream';
-          found.push({data:buffer.toString('base64'),mime,name:saved,url:'browser-download'});
-          log(`Artifact control downloaded: ${saved} (${buffer.length} bytes)`);
+          found.push({path:sourcePath,mime,name:saved,url:'browser-download'});
+          log(`Artifact control downloaded: ${saved} (${fs.statSync(sourcePath).size} bytes)`);
           break;
         }
         log(`Artifact control exhausted without a file; events=${JSON.stringify(downloadEvents)}; network=${JSON.stringify(networkEvents.slice(-12))}`);
@@ -642,7 +674,6 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
   } catch(error) { log(`Download-button collection warning: ${error.message}`); }
   finally {
     if(client) await client.detach().catch(()=>{});
-    fs.rmSync(downloadDir,{recursive:true,force:true});
   }
   const outDir=OUTBOX_DIR;
   fs.mkdirSync(outDir,{recursive:true,mode:0o755});
@@ -673,21 +704,40 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
     '.ply':'model/ply','.stl':'model/stl','.dae':'model/vnd.collada+xml','.dxf':'image/vnd.dxf',
   }[path.extname(String(name||'')).toLowerCase()]||'');
   for(const item of found) {
-    const buffer=Buffer.from(item.data,'base64');
-    const hash=crypto.createHash('sha256').update(buffer).digest('hex');
+    const sourcePath=item.path || null;
+    const buffer=sourcePath ? null : Buffer.from(item.data,'base64');
+    const hash=sourcePath
+      ? await new Promise((resolve,reject)=>{
+          const digest=crypto.createHash('sha256');
+          const stream=fs.createReadStream(sourcePath);
+          stream.on('data',chunk=>digest.update(chunk));
+          stream.on('end',()=>resolve(digest.digest('hex')));
+          stream.on('error',reject);
+        })
+      : crypto.createHash('sha256').update(buffer).digest('hex');
     if(seenHashes.has(hash)) continue;
     seenHashes.add(hash);
-    const detectedMime=sniffImageMime(buffer);
+    let header=buffer;
+    if(sourcePath) {
+      header=Buffer.alloc(12);
+      const descriptor=fs.openSync(sourcePath,'r');
+      try { fs.readSync(descriptor,header,0,12,0); }
+      finally { fs.closeSync(descriptor); }
+    }
+    const detectedMime=sniffImageMime(header);
     let original=String(item.name||'').replace(/[\\/:*?"<>|\r\n]/g,' ').trim();
     if(!original || original.length>120) original=`chatgpt-file${extFor(detectedMime||item.mime)}`;
     else if(!path.extname(original)) original+=extFor(detectedMime||item.mime);
     let ext=path.extname(original).slice(0,12);
     if(!ext) ext=extFor(item.mime);
     const filename=`chatgpt-${crypto.randomUUID()}${ext}`;
-    fs.writeFileSync(path.join(outDir,filename),buffer,{mode:0o644});
+    const destination=path.join(outDir,filename);
+    if(sourcePath) fs.copyFileSync(sourcePath,destination);
+    else fs.writeFileSync(destination,buffer,{mode:0o644});
     const mime=detectedMime || ((item.mime&&item.mime!=='application/octet-stream') ? item.mime : (mimeForName(original)||item.mime||'application/octet-stream'));
-    artifacts.push({filename,originalName:original,mime,size:buffer.length,sha256:hash});
+    artifacts.push({filename,originalName:original,mime,size:sourcePath?fs.statSync(sourcePath).size:buffer.length,sha256:hash});
   }
+  fs.rmSync(downloadDir,{recursive:true,force:true});
   if(artifacts.length) log(`Collected ${artifacts.length} assistant artifact(s): ${artifacts.map(a=>a.originalName).join(', ')}`);
   else {
     const diagnostics=await page.evaluate((targetTurnId)=>{
@@ -1179,10 +1229,32 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
     if(!state.envelope && state.text?.trim() && !/^(?:analyzing|thinking|working|generating|processing)(?:\.{0,3}|\s+\d+%)?$/i.test(state.text.trim())) {
       if(state.text===stablePlainText) {
         if(canCollectCompletedTurn(state,Date.now()-plainTextSince,3000)) {
-          const current=await extractLastAssistantMessage(page);
-          if(current!==state.text.trim()) throw new Error('Plain response changed while collecting final answer');
+          // Read the rendered text and the transport value from the SAME turn
+          // in one DOM snapshot. A fenced JSON response renders with a code
+          // block label, while the transport correctly extracts raw code;
+          // comparing those two different representations falsely reported a
+          // changed response and made Agent Zero see an empty model turn.
+          const current=await page.evaluate(expectedTurnId => {
+            const turn=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
+              .filter(el=>!el.querySelector('[data-message-author-role="user"]')).at(-1);
+            if(turn?.getAttribute('data-testid')!==expectedTurnId) return null;
+            const last=turn.querySelector('[data-message-author-role="assistant"]');
+            if(!last) return null;
+            const rendered=last.innerText.trim();
+            const blocks=last.querySelectorAll('pre code');
+            let raw=rendered;
+            if(blocks.length===1) {
+              const code=blocks[0].textContent.trim();
+              try { if(JSON.parse(code)!==null) raw=code; } catch {}
+            }
+            return {rendered,raw};
+          },responseTurnId);
+          if(!current || current.rendered!==state.text.trim() || !current.raw.trim()) {
+            stablePlainText=''; plainTextSince=0;
+            continue;
+          }
           log('Completed plain response; mapped chat kept visible');
-          return current;
+          return current.raw;
         }
       } else { stablePlainText=state.text; plainTextSince=Date.now(); }
     } else { stablePlainText=''; plainTextSince=0; }

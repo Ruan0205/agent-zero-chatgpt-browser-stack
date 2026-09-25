@@ -1,0 +1,5 @@
+name: _chat_usage
+title: Uso por chat e aviso sonoro
+description: Mostra tokens por conversa e toca um aviso discreto ao receber resposta final.
+version: 1.0.0
+always_enabled: true

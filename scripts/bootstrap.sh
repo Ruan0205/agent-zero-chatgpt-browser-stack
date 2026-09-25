@@ -16,6 +16,14 @@ mkdir -p \
   "$data_root/browser" \
   "$data_root/browser/provider-cooldown" \
   "$data_root/browser-utility" \
+  "$data_root/browser-repair" \
+  "$data_root/browser-repair-workspace" \
+  "$data_root/agent-zero-repair/chats" \
+  "$data_root/agent-zero-repair/uploads" \
+  "$data_root/agent-zero-repair/workdir" \
+  "$data_root/agent-zero-repair/plugins/browser_session_bridge" \
+  "$data_root/repair-control" \
+  "$data_root/repair-gh" \
   "$data_root/browser-workspace" \
   "$data_root/vscode-config" \
   "$data_root/workspace/chats" \
@@ -26,6 +34,8 @@ mkdir -p \
 # Both browser containers run as uid 1000. Keep existing profile contents
 # intact; only make the volume roots writable for a first installation.
 chown 1000:1000 "$data_root/browser" "$data_root/browser/provider-cooldown" "$data_root/browser-utility" "$data_root/browser-workspace"
+chown 1000:1000 "$data_root/browser-repair" "$data_root/browser-repair-workspace"
+chmod 0700 "$data_root/repair-control"
 
 copy_once() {
   source=$1
@@ -37,11 +47,30 @@ copy_once() {
 }
 
 copy_once "$seed_root/settings.json" "$data_root/agent-zero/settings.json"
+copy_once "$seed_root/settings.json" "$data_root/agent-zero-repair/settings.json"
+repair_prompt="$data_root/agent-zero-repair/agents/agent0/prompts/agent.system.main.specifics.md"
+repair_seed="$seed_root/agents/agent0/prompts/agent.system.main.repair.md"
+if [ -f "$repair_prompt" ] && ! cmp -s "$repair_seed" "$repair_prompt"; then
+  repair_backup="$data_root/.stack-backups/${STACK_SCHEMA_VERSION:-v2.12-stack.10}/repair-prompt"
+  mkdir -p "$repair_backup"
+  cp "$repair_prompt" "$repair_backup/agent.system.main.specifics.md"
+fi
+mkdir -p "$(dirname "$repair_prompt")"
+cp "$repair_seed" "$repair_prompt"
+if [ ! -e "$data_root/agent-zero-repair/plugins/browser_session_bridge/plugin.yaml" ]; then
+  cp -R "$seed_root/plugins/browser_session_bridge/." "$data_root/agent-zero-repair/plugins/browser_session_bridge/"
+fi
 copy_once "$seed_root/server_context.md" "$data_root/agent-zero/server_context.md"
 for profile in default developer hacker researcher tiny-local; do
   copy_once "$seed_root/agents/$profile/agent.yaml" "$data_root/agent-zero/agents/$profile/agent.yaml"
 done
 copy_once "$seed_root/agents/agent0/prompts/agent.system.main.specifics.md" "$data_root/agent-zero/agents/agent0/prompts/agent.system.main.specifics.md"
+copy_once "$seed_root/agents/agent0/prompts/agent.system.tool.tasks.md" "$data_root/agent-zero/agents/agent0/prompts/agent.system.tool.tasks.md"
+copy_once "$seed_root/agents/agent0/tools/tasks.py" "$data_root/agent-zero/agents/agent0/tools/tasks.py"
+for tool in job_status browser_bridge_status artifact_verify server_diagnostics project_check; do
+  copy_once "$seed_root/agents/agent0/tools/$tool.py" "$data_root/agent-zero/agents/agent0/tools/$tool.py"
+  copy_once "$seed_root/agents/agent0/prompts/agent.system.tool.$tool.md" "$data_root/agent-zero/agents/agent0/prompts/agent.system.tool.$tool.md"
+done
 copy_once "$seed_root/plugins/_model_config/config.json" "$data_root/agent-zero/plugins/_model_config/config.json"
 copy_once "$seed_root/plugins/_model_config/presets.yaml" "$data_root/agent-zero/plugins/_model_config/presets.yaml"
 copy_once "$seed_root/plugins/_code_execution/config.json" "$data_root/agent-zero/plugins/_code_execution/config.json"

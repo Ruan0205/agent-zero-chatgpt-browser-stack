@@ -8,13 +8,23 @@ args:
 rules:
 - place the command or script in `code`
 - use `runtime=output` to poll running work
+- after two consecutive output polls with no new command bytes, STOP polling
+  that session. Its `running` flag proves only that the local terminal has not
+  returned a prompt. Open a different terminal session ID for one bounded,
+  read-only process/log/health check; do not start the original command again.
+- if that independent check proves the job is alive and advancing, wait without
+  cycling through repeated model/tool calls. If it proves failure, preserve
+  partial output and stop only the exact disposable job you started. If the
+  state remains uncertain, report uncertainty and pause instead of looping.
+- poll only if the previous tool result explicitly says the process is still running; a returned shell prompt means the command has ended, even if the final output contains no separate completion banner
 - use `input` for interactive terminal prompts
 - if a session seems stuck, first inspect its exact process tree and progress;
   reset only the confirmed disposable session, never a service or unrelated job
 - check dependencies before running code
 - replace placeholder or demo data with real values before execution
 - use `print()` or `console.log()` when you need explicit output
-- do not interleave other tools while waiting
+- a separate read-only diagnostic session is allowed while a long-running
+  command owns its original terminal session; do not issue conflicting writes
 - treat trailing framework `[SYSTEM: ...]` info as execution status, not command output; use it to decide whether to wait, reset, rerun, or continue
 - probe cwd files tools and dependencies before expensive commands
 - when searching source code, use targeted paths and file globs (`rg` when available);

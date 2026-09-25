@@ -7,7 +7,18 @@ function composerChunks(text, maxUnits=1024) {
   const result=[];
   let chunk='';
   for(const char of String(text)) {
-    if(chunk.length+char.length>maxUnits) {result.push(chunk);chunk='';}
+    if(chunk.length+char.length>maxUnits) {
+      // Prefer a nearby word boundary. Splitting an escaped newline ("\\n")
+      // between input events can make ProseMirror discard the continuation.
+      const floor=Math.floor(maxUnits*0.75);
+      let cut=chunk.length;
+      for(let i=chunk.length-1;i>=floor;i--) {
+        if(/\s/.test(chunk[i])) {cut=i+1;break;}
+      }
+      if(cut===chunk.length && chunk.length>1 && chunk.endsWith('\\')) cut--;
+      result.push(chunk.slice(0,cut));
+      chunk=chunk.slice(cut);
+    }
     chunk+=char;
   }
   if(chunk) result.push(chunk);

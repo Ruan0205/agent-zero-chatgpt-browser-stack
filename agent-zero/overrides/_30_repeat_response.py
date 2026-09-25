@@ -13,6 +13,8 @@ from helpers.print_style import PrintStyle
 STATE_KEY = "_repeated_tool_call_guard"
 MAX_IDENTICAL_TOOL_REPEATS = 2
 MAX_BOUNDED_POLL_REPEATS = 180
+MAX_IDLE_STATUS_POLLS = 3
+MAX_STALLED_STATUS_POLLS = 3
 SENSITIVE_KEYS = {"authorization", "cookie", "key", "password", "secret", "token"}
 
 
@@ -106,6 +108,54 @@ def _last_execution_is_running(agent: Any) -> bool:
     return False
 
 
+def _terminal_session_running(agent: Any, response: str) -> bool | None:
+    """Read the executor state instead of inferring liveness from old text."""
+    try:
+        payload = json.loads(response.strip())
+        args = payload.get("tool_args", {})
+        session = int(args.get("session", 0))
+        state = agent.get_data("_cet_state")
+        shell = state.shells.get(session) if state else None
+        return bool(shell.running) if shell is not None else None
+    except (AttributeError, TypeError, ValueError, KeyError):
+        return None
+
+
+def _terminal_silent_polls(agent: Any, response: str) -> int:
+    """Count output polls that returned no command bytes, not elapsed time."""
+    if not _is_output_poll(response):
+        return 0
+    try:
+        payload = json.loads(response.strip())
+        session = str(int(payload.get("tool_args", {}).get("session", 0)))
+        state = agent.loop_data.params_persistent.get("_terminal_no_progress", {})
+        return int(state.get(session, 0)) if isinstance(state, dict) else 0
+    except (AttributeError, TypeError, ValueError, KeyError):
+        return 0
+
+
+def _stalled_terminal_fallback(response: str) -> str:
+    """Stop the model loop without pretending the external process finished."""
+    try:
+        session = int(json.loads(response.strip()).get("tool_args", {}).get("session", 0))
+    except (AttributeError, TypeError, ValueError, KeyError):
+        session = 0
+    return json.dumps(
+        {
+            "thoughts": ["Repeated silent polls cannot establish process health."],
+            "headline": "Monitoramento pausado sem progresso",
+            "tool_name": "response",
+            "tool_args": {"text": (
+                f"Interrompi o ciclo de consultas sem progresso da sessão {session}. "
+                "Isso não prova que o processo remoto terminou, e não o matei. "
+                "É preciso verificar processo, log e serviço por uma sessão independente "
+                "antes de decidir aguardar, retomar ou encerrar somente o job identificado."
+            )},
+        },
+        ensure_ascii=False,
+    )
+
+
 def _controlled_fallback(response: str) -> str:
     """Build a normal final response when the model ignores the recovery protocol."""
     try:
@@ -160,13 +210,20 @@ class RepeatResponse(Extension):
         previous = _response_signature(self.agent.loop_data.last_response)
         exact_repeat = response == self.agent.loop_data.last_response
         repeated_tool = current is not None and previous is not None and current[0] == previous[0]
-        if not exact_repeat and not repeated_tool:
+        stalled_output_poll = _terminal_silent_polls(self.agent, response) >= 2
+        if not exact_repeat and not repeated_tool and not stalled_output_poll:
             self.agent.loop_data.params_persistent.pop(STATE_KEY, None)
             return
 
         state = self.agent.loop_data.params_persistent
         iteration = self.agent.loop_data.iteration
-        signature = current[0] if current is not None else f"raw:{response}"
+        # Treat attempts to poll the same silent session as one loop even if
+        # the model changes inconsequential arguments between calls.
+        signature = (
+            f"stalled-output:{json.loads(response).get('tool_args', {}).get('session', 0)}"
+            if stalled_output_poll else
+            current[0] if current is not None else f"raw:{response}"
+        )
         prior = state.get(STATE_KEY, {})
         consecutive = (
             prior.get("count", 0) + 1
@@ -186,15 +243,43 @@ class RepeatResponse(Extension):
         stuck = current[1] if current is not None else "identical textual response"
         bounded_poll = current is not None and _is_bounded_status_poll(response)
         if bounded_poll and _is_output_poll(response):
-            bounded_poll = _last_execution_is_running(self.agent)
-        max_repeats = MAX_BOUNDED_POLL_REPEATS if bounded_poll else MAX_IDENTICAL_TOOL_REPEATS
+            live = _terminal_session_running(self.agent, response)
+            bounded_poll = live if live is not None else _last_execution_is_running(self.agent)
+        if stalled_output_poll:
+            bounded_poll = False
+        idle_status_poll = _is_output_poll(response) and _terminal_session_running(self.agent, response) is False
+        max_repeats = (
+            MAX_STALLED_STATUS_POLLS if stalled_output_poll else
+            MAX_BOUNDED_POLL_REPEATS if bounded_poll else
+            MAX_IDLE_STATUS_POLLS if idle_status_poll else
+            MAX_IDENTICAL_TOOL_REPEATS
+        )
         if consecutive < max_repeats:
-            if max_repeats == MAX_BOUNDED_POLL_REPEATS:
+            if bounded_poll or (idle_status_poll and not stalled_output_poll):
                 # Let the poll run. Its tool result may change as the job finishes;
-                # the finite cap still prevents a permanently stuck wait loop.
+                # idle sessions are converted to an immediate status result by
+                # the terminal tool extension, while finite caps prevent loops.
                 return
             protocol = getattr(self.agent.loop_data, "protocol_temporary", None)
             if isinstance(protocol, dict):
+                if stalled_output_poll:
+                    warning = (
+                        "The same terminal session has returned no command output in at least "
+                        "two consecutive polls. Its running flag is not proof of progress. "
+                        "Do not poll runtime=output again. In a DIFFERENT terminal session, "
+                        "perform one bounded, read-only check of the exact process tree, log "
+                        "and health endpoint. If the process is healthy, report that it is "
+                        "still active and wait outside this tool loop. If it has failed, "
+                        "preserve partial results and stop only the identified disposable job."
+                    )
+                elif _is_output_poll(response) and not bounded_poll:
+                    warning = (
+                        "The last terminal result did not explicitly report a live job. "
+                        "Do not poll the same output session again. If the artifact or "
+                        "exit status was already verified, continue with the next step; "
+                        "otherwise inspect the process or result once using a different "
+                        "read-only check."
+                    )
                 protocol["repeat_guard"] = (
                     f"{warning}\nBlocked call: {stuck}\n"
                     "The latest tool result is already present in history. Base the next "
@@ -212,7 +297,10 @@ class RepeatResponse(Extension):
             result_data["skip_default_processing"] = True
             return
 
-        llm_result.response = _controlled_fallback(response)
+        llm_result.response = (
+            _stalled_terminal_fallback(response) if stalled_output_poll
+            else _controlled_fallback(response)
+        )
         llm_result.reasoning = ""
         if hasattr(llm_result, "output_items"):
             llm_result.output_items = []

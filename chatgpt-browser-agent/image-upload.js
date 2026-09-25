@@ -37,9 +37,15 @@ function failedUploadChatUrl(mappedUrl, requestUrl) {
   return mappedUrl || requestUrl || null;
 }
 
-function uploadedAttachmentsForTurn(state, turnId, latestUserHash) {
+function uploadedAttachmentsForTurn(state, turnId, latestUserHash, toolFollowup=false) {
   if(!turnId || !Array.isArray(state?.uploadedAttachments)) return [];
   if(state.attachmentTurnId===turnId) return state.uploadedAttachments;
+  // Agent Zero may append transient [EXTRAS] to the first serialization of a
+  // human message, then omit it after a tool call. That changes the turn hash
+  // even though ChatGPT has already received the attachment. A tool follow-up
+  // cannot be a fresh user upload, so retain the completed upload for it.
+  // A new explicit human message still starts with no inherited uploads.
+  if(toolFollowup) return state.uploadedAttachments;
   // Migrate records written with the old position-dependent turn ID. The
   // message hash proves this human message was already in the prior request.
   // New records use a stable identity and must not use this fallback, because

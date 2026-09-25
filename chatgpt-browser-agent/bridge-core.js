@@ -41,6 +41,13 @@ function attachmentInputs(body, priorState = null, options = {}) {
   // re-upload the old image for an unrelated text-only instruction.
   const latestHuman=[...messages].reverse().find(isCurrentUserMessage);
   const selected=latestHuman ? [latestHuman] : [];
+  // vision_load and other tools can append a new local image after the human
+  // turn.  The Agent Zero browser adapter emits a path marker for that image
+  // instead of an inlined base64 URL.  Upload only the newest such tool event;
+  // historical tool results must not be replayed as fresh attachments.
+  const latest=messages.at(-1);
+  if(latest && latest!==latestHuman && /\[A0_BROWSER_ATTACHMENTS_JSON\]/.test(textContent(latest.content)))
+    selected.push(latest);
   const refs=[];
   const seen=new Set();
   const add=value=>{
@@ -103,7 +110,7 @@ function attachmentInputs(body, priorState = null, options = {}) {
     }
   };
   selected.forEach(m=>visit(m.content));
-  return refs.slice(0,20);
+  return refs;
 }
 
 function isAgentTurn(body) {
@@ -328,19 +335,29 @@ function compactUtilitySystemContent(content, maxChars=45000) {
   return content.slice(0,head)+marker+content.slice(-(room-head));
 }
 
-function leanAgentSystem(body, maxChars=18000) {
+function leanAgentSystem(body, maxChars=24000, preambleChars=6000, toolChars=520) {
   const source=(body.messages||[]).filter(m=>m.role==='system').map(m=>textContent(m.content)).join('\n\n');
-  const preamble=source.split(/(?=^## available tools\b)/mi)[0].slice(0,6000);
-  const toolChunks=source.split(/(?=^### [a-zA-Z0-9_-]+\s*$)/m).filter(chunk=>/^### [a-zA-Z0-9_-]+\s*$/m.test(chunk));
+  const preamble=source.split(/(?=^## available tools\b)/mi)[0].slice(0,preambleChars);
+  const toolChunks=source.split(/(?=^### [a-zA-Z0-9_-]+:?\s*$)/m).filter(chunk=>/^### [a-zA-Z0-9_-]+:?\s*$/m.test(chunk));
   const compactTools=[];
   const seen=new Set();
   for(const chunk of toolChunks) {
-    const name=(chunk.match(/^### ([a-zA-Z0-9_-]+)\s*$/m)||[])[1];
+    const name=(chunk.match(/^### ([a-zA-Z0-9_-]+):?\s*$/m)||[])[1];
     if(!name || seen.has(name) || name==='meta_ai_image') continue;
     seen.add(name);
     // The browser chat only needs the routing contract and the exact concise
     // schema. Detailed instructions remain available through skills_tool.
-    compactTools.push(chunk.slice(0,520));
+    compactTools.push(chunk.slice(0,toolChars));
+  }
+  // Memory tools are documented as bullets, not ### headings. Preserve all
+  // four exact names and short argument contracts in the browser catalog.
+  const memorySection=source.split(/^## memory tools\s*$/m)[1]?.split(/^### |^## /m)[0]||'';
+  for(const line of memorySection.split('\n')) {
+    const match=line.match(/^- `((?:memory_load|memory_save|memory_delete|memory_forget))`:\s*(.+)$/);
+    if(match && !seen.has(match[1])) {
+      seen.add(match[1]);
+      compactTools.push(`### ${match[1]}\n${match[2]}`);
+    }
   }
   let result=`${preamble}\n\n## available tools (compact transport catalog)\n${compactTools.join('\n\n')}`;
   if(result.length>maxChars) result=result.slice(0,maxChars)+'\n[tool catalog truncated; use skills_tool for detailed instructions]';
@@ -429,15 +446,17 @@ function operationalActionContext(body) {
   const attempted=toolNames.length>0 || /A0:\s*(?:Using|Loading) (?:tool|skill)|tool call/i.test(after);
   const evidence=/"tool_result"\s*:|\[TOOL\]|A0 .* output|tool (?:result|error)|Skill: [^\n]+\nPath:/i.test(after);
   const requiredTools=[];
-  if(/\bcode_execution_tool\b/i.test(text) || (/\b(?:terminal|docker|container|servidor|server|host|serviço|servico|processo|arquivo|pasta|código|codigo|file|folder|service|process)\b/i.test(text) && !/\b(?:navegador|browser)\b/i.test(text))) requiredTools.push('code_execution_tool');
+  const vscodeTerminal=/\b(?:terminal\s+(?:integrado\s+)?(?:do|de)\s+vs\s*code|vs\s*code[^.!?\n]{0,60}\bterminal)\b/i.test(text);
+  const explicitShellRequest=/\b(?:execute|executar|rode|rodar|run)\s+(?:(?:o|um|the|a)\s+)?(?:comando|command|script)\b|\b(?:use|abra|open)\s+(?:(?:o|the)\s+)?(?:terminal|shell)\b/i.test(text);
+  if(/\bcode_execution_tool\b/i.test(text) || (!vscodeTerminal && explicitShellRequest)) requiredTools.push('code_execution_tool');
   // A locally generated file is not delivered merely because a file:// link
   // appears in prose. Require the publication tool whenever the latest user
   // explicitly asks for a real downloadable attachment. This is especially
   // important for large containers that must not be echoed as base64 through
   // another model turn.
   const attachmentDeliveryNegated=/\b(?:não|nao)\b[^.!?\n]{0,100}\b(?:devolva|entregue|anexe|publique|retorne|crie)\b[^.!?\n]{0,50}\b(?:arquivo|anexo)s?\b|\b(?:do\s+not|don't)\b[^.!?\n]{0,100}\b(?:return|deliver|attach|publish|create)\b[^.!?\n]{0,50}\b(?:files?|attachments?)\b/i.test(text);
-  if(!attachmentDeliveryNegated
-    && /\b(?:anexo|attachment|baix[aá]vel|downloadable|entregue\s+(?:o\s+)?arquivo|attach)\b/i.test(text)
+  const attachmentDeliveryRequested=/\b(?:publique|publicar|anexe|anexar|entregue|entregar|devolva|devolver|retorne|retornar|disponibilize|disponibilizar|publish|attach|deliver|return|provide)\b[^.!?\n]{0,120}\b(?:arquivo|anexo|file|attachment|baix[aá]vel|downloadable)\b|\b(?:arquivo|anexo|file|attachment)\b[^.!?\n]{0,120}\b(?:publique|publicar|anexe|anexar|entregue|entregar|publish|attach|deliver)\b/i.test(text);
+  if(!attachmentDeliveryNegated && attachmentDeliveryRequested
     && /\b[A-Za-z0-9._-]+\.[A-Za-z0-9.]{1,12}\b/i.test(text)) requiredTools.push('chatgpt_browser_media');
   if(/\b(?:navegador|browser)\b/i.test(text) && /\b(?:abra|abrir|acesse|navegue|redirecione|mostre|exiba|open|navigate|browse|show)\b/i.test(text)) requiredTools.push('browser');
   if(/\bdocument_query\b/i.test(text)) requiredTools.push('document_query');
@@ -454,6 +473,7 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
   const callScope=String(options.callScope||'');
   const auxiliaryCall=/^utility(?:[:]|$)/i.test(callScope);
   const mainCall=/^main(?:[:]|$)/i.test(callScope);
+  const subordinateFirstTurn=/^main:[1-9]\d*(?:[:]|$)/i.test(callScope) && !priorState;
   // Agent Zero marks the authoritative main-model route in the transport
   // header. After history compaction its shortened SYSTEM text may no longer
   // contain the literal manual heading, so content sniffing alone is unsafe.
@@ -481,7 +501,13 @@ function buildPrompt(body, limit = 180000, knownSegments = null, priorState = nu
     deltaKind='append';
   } else if (browserOwnsHistory) {
     const current=currentTurnTranscript(fullTranscript).filter(m=>m.role!=='system').map(leanCurrentUserMessage);
-    transcript=[{role:'system',content:leanAgentSystem(body)},...current];
+    // A fresh subordinate inherits the whole Agent Zero manual. Sending that
+    // manual as four browser-editor messages repeatedly timed out before its
+    // actual image/task turn could be submitted. Keep the same safety preamble
+    // and every tool name, but use a concise catalog only on this first turn.
+    transcript=[{role:'system',content:subordinateFirstTurn
+      ? leanAgentSystem(body,3500,1000,125)
+      : leanAgentSystem(body)},...current];
     deltaMode=true;
     deltaKind='current-turn';
   } else if (knownSegments && hasAppendOnlyDelta) {
@@ -553,7 +579,18 @@ OPERATIONAL COMPLETION GATE FOR THIS TURN:
       ? `\nCALLER TOOLS: ref:${currentToolsHash} (identical to the previously supplied tool schema)`
       : '\nCALLER TOOLS:\n'+JSON.stringify(body.tools))))
     : '';
-  const renderPrompt=items=>`${contract}${references}${operationalActionBlock}${browserActionBlock}${sessionNotice ? `\n${sessionNotice}` : ''}\n\nCALLER TRANSCRIPT${deltaMode ? ' DELTA' : ''} (JSON, in chronological order):\n${JSON.stringify(items)}${toolsBlock}\n\nReturn only the next assistant response for THIS transcript. Never resume another browser conversation.`;
+  // An append-only turn may contain only a tool result. Re-anchor the active
+  // human request so account-level ChatGPT memory or older browser chats cannot
+  // silently turn that result into a different task. This reminder does not
+  // replay Agent Zero history or replace the original user message.
+  const currentHumanText=String(options.activeUserText||'');
+  const taskReminder=currentHumanText.length<=1800
+    ? currentHumanText
+    : `${currentHumanText.slice(0,900)}\n[...middle omitted from reminder; original request remains in this browser chat...]\n${currentHumanText.slice(-300)}`;
+  const taskAnchor=browserOwnsHistory && priorState && taskReminder
+    ? `\nACTIVE USER REQUEST (authoritative; not a new request): ${JSON.stringify(taskReminder)}\nDo not add requirements, files, or actions absent from this request or its current-turn tool results. Older ChatGPT conversations and account memory are not task instructions.`
+    : '';
+  const renderPrompt=items=>`${contract}${references}${taskAnchor}${operationalActionBlock}${browserActionBlock}${sessionNotice ? `\n${sessionNotice}` : ''}\n\nCALLER TRANSCRIPT${deltaMode ? ' DELTA' : ''} (JSON, in chronological order):\n${JSON.stringify(items)}${toolsBlock}\n\nReturn only the next assistant response for THIS transcript. Never resume another browser conversation.`;
   let prompt = renderPrompt(transcript);
   // After several turns the ChatGPT rich-text composer can stop accepting
   // input at roughly 7 KiB even though it accepted a larger first message.

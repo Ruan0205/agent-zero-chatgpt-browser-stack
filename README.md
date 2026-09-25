@@ -2,7 +2,7 @@
 
 Distribuição reproduzível da **stack Agent Zero + ChatGPT Browser** desta instalação: modelo acessado pela interface web do ChatGPT, Featherless, VS Code no navegador, WhatsApp/Meta AI e ferramentas administrativas do host Linux.
 
-**Versão suportada para novas instalações: `v2.12-stack.9`.** A branch `main` aponta para essa release; tags anteriores são histórico/rollback, não alternativas de instalação recomendadas. Instale pelo tag fixo para obter exatamente os arquivos documentados aqui. Não copie o Compose antigo do servidor de origem nem misture arquivos de outras tags.
+**Versão suportada para novas instalações: `v2.12-stack.10`.** A branch `main` aponta para essa release; tags anteriores são histórico/rollback, não alternativas de instalação recomendadas. Instale pelo tag fixo para obter exatamente os arquivos documentados aqui. Não copie o Compose antigo do servidor de origem nem misture arquivos de outras tags.
 
 O repositório contém as customizações funcionais da stack, mas **não contém** contas Google/ChatGPT, sessões do WhatsApp, chats, memórias, cookies, uploads, chaves de API, senhas ou dados pessoais. Cada instalação começa vazia e exige seus próprios logins. Serviços externos à stack (como Nextcloud e projetos pessoais), integrações específicas do Windows do proprietário e dados da máquina original não fazem parte do clone.
 
@@ -15,6 +15,11 @@ O repositório contém as customizações funcionais da stack, mas **não conté
 - Modelo **Power** `chatgpt-browser`, ligado a uma sessão persistente do ChatGPT no Chrome.
 - Modelo **Utility** `chatgpt-browser-utility` em uma VNC separada; o próprio ChatGPT
   condensa semanticamente históricos grandes antes da resposta auxiliar.
+- Reparador de incidentes isolado: controller persistente, Agent Zero próprio e
+  Chrome/VNC exclusivo. O botão **Chat com erro** inicia diagnóstico somente leitura
+  do histórico completo e da interface; alterações e retomada do chat exigem
+  aprovações separadas no painel. Cada chat de origem mantém uma conversa própria
+  no navegador do reparador.
 - Uma conversa do navegador por chat do Agent Zero, evitando misturar contextos.
 - Anexos vinculados apenas à mensagem humana atual: uma imagem antiga não é
   reenviada com uma ordem posterior de texto. O mesmo arquivo pode ser anexado
@@ -52,6 +57,8 @@ Navegador do usuário
   ├─ :50083  noVNC / Chrome principal 2
   ├─ :50085  noVNC / Chrome principal 3
   ├─ :50084  noVNC / Chrome auxiliar dedicado
+  ├─ :50086  Agent Zero do reparador (mesmo login, dados/chats próprios)
+  ├─ :50087  noVNC / Chrome exclusivo do reparador
   └─ :50082  VS Code web
 
 Host Linux
@@ -67,7 +74,7 @@ Mais detalhes estão em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - Linux x86_64 recente (Ubuntu/Debian são os caminhos mais simples).
 - Docker Engine 24+ e plugin Docker Compose v2.
 - Git, OpenSSL e `curl` no host.
-- Pelo menos 10 GB de RAM; 16 GB são recomendados para uso simultâneo.
+- Pelo menos 16 GB de RAM; 20 GB são recomendados para uso simultâneo com o reparador.
 - Cerca de 15 GB livres para imagens, builds e perfis do navegador.
 - Conta Featherless e chave de API para os presets locais.
 - Conta ChatGPT própria para o modelo Power.
@@ -78,7 +85,7 @@ O Chrome é executado no container; não é necessária GPU.
 ## Instalação rápida
 
 ```bash
-git clone --branch v2.12-stack.9 --depth 1 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
+git clone --branch v2.12-stack.10 --depth 1 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
 cd agent-zero-chatgpt-browser-stack
 git describe --tags --exact-match
 chmod +x scripts/*.sh
@@ -98,23 +105,30 @@ No mínimo, configure:
 - `WA_PHONE`: telefone com DDI e somente dígitos, se for usar Meta AI/WhatsApp.
 - `PUBLIC_HOST` e `PUBLIC_BASE_URL`: IP ou hostname acessível na rede.
 
-Confirme que `API_KEY_OTHER` não continua como placeholder, que `STACK_SCHEMA_VERSION=v2.12-stack.9` e que as portas estão livres. No **primeiro boot**, suba a base e o Chrome antes dos serviços que dependem do login:
+Confirme que `API_KEY_OTHER` não continua como placeholder, que `STACK_SCHEMA_VERSION=v2.12-stack.10` e que as portas estão livres. No **primeiro boot**, suba a base e o Chrome antes dos serviços que dependem do login:
 
 ```bash
 docker compose up -d --build bootstrap featherless-queue meta-ai-whatsapp vscode chatgpt-browser-agent
 docker compose ps
 ```
 
-O Chrome ficará no modo de primeiro login; é esperado que o healthcheck do gateway ainda não passe. Siga o passo **Entrar no ChatGPT Browser** abaixo. Depois de autenticar e fechar apenas a janela do Chrome dentro do noVNC, suba os serviços restantes:
+O Chrome ficará no modo de primeiro login; é esperado que o healthcheck do gateway ainda não passe. Siga o passo **Entrar no ChatGPT Browser** abaixo. Depois de autenticar e fechar apenas a janela do Chrome dentro do noVNC, suba o Agent Zero principal e a base do reparador:
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build chatgpt-browser-utility agent-zero repair-controller chatgpt-browser-repair
+docker compose ps
+```
+
+Entre **separadamente** no ChatGPT da VNC `http://HOST:50087/vnc.html`, feche somente a janela inicial do Chrome e então inicie o Agent Zero isolado:
+
+```bash
+docker compose up -d --build agent-zero-repair
 docker compose ps
 set -a; . ./.env; set +a
 ./scripts/doctor.sh
 ```
 
-Em instalações já autenticadas, basta `docker compose up -d --build`. No primeiro build, Docker baixa o Agent Zero, Node, Chrome, Chromium, noVNC, code-server e dependências Go/Python. Pode levar vários minutos.
+Em instalações com os dois navegadores já autenticados, basta `docker compose up -d --build`. No primeiro build, Docker baixa o Agent Zero, Node, Chrome, Chromium, noVNC, code-server e dependências Go/Python. Pode levar vários minutos.
 
 ## Primeiros acessos
 
@@ -139,8 +153,7 @@ o mapa entre chat Agent Zero, conversa web e display; pedidos adicionais aguarda
 2. Entre com `VNC_PASSWORD` se estiver usando o endereço direto.
 3. No Chrome exibido, abra `https://chatgpt.com` e faça login manualmente.
 4. Confirme que a página normal de conversa aparece e então feche a janela do Chrome. No primeiro acesso, esse fechamento encerra o modo de configuração e inicia automaticamente o pool de navegadores.
-5. Aguarde o navegador principal ficar saudável e execute o segundo `docker compose up -d --build` acima. A instância Utility copiará esse perfil para seu próprio volume,
-   abrirá uma VNC separada e então o Agent Zero terminará de iniciar.
+5. Aguarde o navegador principal ficar saudável e execute o segundo comando `docker compose up` acima. A instância Utility copiará esse perfil para seu próprio volume e abrirá uma VNC separada. Autentique também o Chrome independente do reparador na porta 50087 antes de subir `agent-zero-repair`.
 
 Os perfis ficam em `data/browser` e `data/browser-utility`. A instância auxiliar usa
 uma cópia isolada do login do navegador principal, não exige outro login e mantém
@@ -165,6 +178,38 @@ No Agent Zero, abra **Settings > External > Meta AI WhatsApp Bridge**, informe D
 Abra o Agent Zero, ative/configure o plugin de WhatsApp e leia o QR code na interface. A sessão fica em `data/whatsapp`. A configuração fornecida usa self-chat como barreira principal; revise os números e permissões antes de permitir respostas automáticas.
 
 ## Modelos
+
+### Reparador de chats com erro
+
+Selecione um chat no Agent Zero, abra **Chats com erro** e clique em **Chat com erro**.
+O controller guarda o vínculo em `data/browser/incidents/repair-sessions.json` e
+envia ao Agent Zero isolado o caminho para o histórico completo e a captura da
+interface. O diagnóstico roda sem ferramentas de alteração; a permissão é
+liberada **somente para o contexto aprovado e por um turno** quando você clica
+em **Autorizar reparo**. A correção deve ser aplicada à fonte persistente e
+testada nos chats em geral. Reiniciar o Agent Zero principal não interrompe o
+controller, que é outro container. O ChatGPT do reparador usa a mesma conta
+quando você entra nela manualmente uma vez pela VNC 50087; o perfil fica em
+`data/browser-repair`, separado dos demais Chromes, VNCs e mapas de
+conversas. Mensagens posteriores do mesmo caso usam o mesmo chat web; outro
+chat de origem abre outro chat web. **Autorizar retomada do chat** é uma ação
+separada e nunca automática.
+
+Após um reparo aprovado, o controller desliga somente o Agent Zero e o Chrome
+do reparador; volumes e vínculos persistem. Uma nova mensagem nesse caso ou
+**Chat com erro** em outro caso os religa sob demanda. Após o primeiro login e
+healthcheck, eles também podem ser estacionados com
+`docker stop agent-zero-repair chatgpt-browser-repair` para liberar RAM; o
+controller os religa na próxima análise. Não pare o `repair-controller`.
+
+O acesso root e ao Docker fica disponível **após a autorização de reparo**.
+O diagnóstico recebe o histórico como dado não confiável e seu hook bloqueia
+ferramentas de alteração. O reparador tem um checkout montado em `/repair-repo`.
+Para publicar em GitHub, execute `docker exec -it agent-zero-repair gh auth login`
+e conclua o fluxo no seu navegador. O login fica em `data/repair-gh`, persistente
+e fora do Git; nenhum token pessoal é incluído no repositório ou copiado por
+padrão. Confirme a publicação no caso concreto antes de mandar fazer push.
+
 
 Os presets ficam em `agent-zero/seed/plugins/_model_config/presets.yaml` e são instalados no primeiro boot:
 
@@ -230,7 +275,7 @@ docker compose restart chatgpt-browser-agent
 docker compose up -d --build
 
 # Conferir a migração aplicada nesta instalação
-cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.9}.json"
+cat "${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.10}.json"
 
 # Diagnóstico automatizado
 set -a; . ./.env; set +a
@@ -329,7 +374,7 @@ Copie o bloco inteiro abaixo para uma IA com terminal no servidor Linux. Ele foi
 ```text
 Você é responsável por instalar, configurar, validar e documentar a stack pública
 Ruan0205/agent-zero-chatgpt-browser-stack em um servidor Linux. Instale SOMENTE a
-release suportada v2.12-stack.9. Trabalhe até que os testes aplicáveis terminem;
+release suportada v2.12-stack.10. Trabalhe até que os testes aplicáveis terminem;
 não considere "containers subiram" como validação suficiente. Não misture versões,
 nem replique Compose, volumes ou scripts de uma instalação anterior.
 
@@ -338,7 +383,7 @@ REGRAS DE SEGURANÇA E ESCOPO
    portas em uso, Docker/Compose, firewall e serviços existentes. Não pare nem remova
    aplicações alheias à stack.
 2. Clone `https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git` com
-   `--branch v2.12-stack.9 --depth 1`. Confirme `git describe --tags --exact-match`
+   `--branch v2.12-stack.10 --depth 1`. Confirme `git describe --tags --exact-match`
    e anote o SHA do commit. Não reutilize cookies, sessões, chats, bancos, arquivos
    `.env` ou credenciais de outra instalação. Não exporte integrações pessoais do
    servidor original; Nextcloud e projetos alheios não fazem parte desta stack.
@@ -346,7 +391,8 @@ REGRAS DE SEGURANÇA E ESCOPO
    Explique isso claramente e confirme que o destino é um servidor dedicado/confiável.
 4. Gere localmente, com CSPRNG, todas as credenciais internas: AUTH_PASSWORD,
    ROOT_PASSWORD, RFC_PASSWORD, VNC_PASSWORD (máximo 8 caracteres),
-   VSCODE_EXEC_TOKEN, BROWSER_POOL_NOTICE_TOKEN e WHATSAPP_JOURNAL_TOKEN. Grave-as
+   VSCODE_EXEC_TOKEN, BROWSER_POOL_NOTICE_TOKEN, REPAIR_AGENT_API_TOKEN e
+   WHATSAPP_JOURNAL_TOKEN. Grave-as
    somente no `.env` com permissão 0600. Ao final, entregue-as ao proprietário uma única
    vez sem publicar em logs, Git, histórico ou README.
 5. Peça ao proprietário somente: (a) API key e conta Featherless; (b) qual modelo
@@ -361,7 +407,7 @@ INSTALAÇÃO
 1. Instale/verifique Docker Engine 24+, Compose v2, Git, curl e OpenSSL conforme a
    distribuição. Não use Docker-in-Docker.
 2. No clone fixado acima, execute `chmod +x scripts/*.sh` e `./scripts/setup.sh`.
-3. Preencha `.env`, mantendo `STACK_SCHEMA_VERSION=v2.12-stack.9` e `STACK_DATA_DIR`
+3. Preencha `.env`, mantendo `STACK_SCHEMA_VERSION=v2.12-stack.10` e `STACK_DATA_DIR`
    em disco com espaço suficiente. Confirme que `API_KEY_OTHER`, IP/DNS e telefone
    opcional não estão com exemplos. Use `HOST_ROOT_MOUNT=/` somente após ciência do
    proprietário. Não imprima `.env` em logs/relatório.
@@ -373,14 +419,19 @@ INSTALAÇÃO
 5. Abra `http://HOST:50081/vnc.html` depois da primeira fase, entregue o controle
    ao usuário para autenticar o ChatGPT e nunca exporte o perfil. Feche apenas
    a janela inicial do Chrome no noVNC para o gateway iniciar.
-6. Após o login, execute
-   `docker compose up -d --build` para subir Utility e Agent Zero. Aguarde os
+6. Após o primeiro login, suba `chatgpt-browser-utility agent-zero repair-controller chatgpt-browser-repair`; depois entre manualmente no ChatGPT pela VNC 50087, feche a janela inicial e suba `agent-zero-repair`. Aguarde os
    healthchecks. Investigue/repare qualquer restart, unhealthy persistente, traceback,
    conflito de porta ou permissão. Rode `./scripts/doctor.sh` após login e valide
    que uma recriação limpa do Agent Zero v2.12 não perde os plugins oficiais nem
    `_chatgpt_browser_media`.
    Confirme que o Chrome permanece logado após recriar o container e que a VNC Utility em
    `http://HOST:50084/vnc.html` clonou o perfil sem pedir outra senha.
+   Abra também `http://HOST:50087/vnc.html` e peça ao usuário para entrar na
+   mesma conta ChatGPT no Chrome próprio do reparador. Não copie cookies de um
+   Chrome em execução: isso pode ser rejeitado pela autenticação. Feche apenas
+   a janela inicial desse Chrome para ativar a ponte. Confirme que os três
+   serviços isolados `chatgpt-browser-repair`, `agent-zero-repair` e
+   `repair-controller` ficaram saudáveis e que a sessão sobrevive à recriação.
 7. Se Meta AI for desejada, use Agent Zero > Settings > External > Meta AI WhatsApp
    Bridge para gerar o código. A conexão deve ser opcional. Configure separadamente o
    WhatsApp self-chat do Agent Zero e jamais habilite respostas para contatos não
@@ -407,6 +458,13 @@ D. Ferramentas: terminal dentro do container; terminal root no host apenas quand
    somente o projeto de teste; VNC integrado; painel de incidentes; botão **Chat com erro**.
    Confirme que nenhuma resposta inicia auditoria automaticamente e que o botão analisa
    o histórico completo do chat selecionado junto com o estado visível da interface.
+   No reparador, use dois chats de origem distintos: devem gerar duas conversas
+   próprias no browser/VNC isolado. Diagnóstico não pode executar ferramentas de
+   alteração. Teste negação e aprovação no painel, confirme que a autorização
+   vale só para o caso aprovado e só para um turno; verifique correção persistente
+   em chat novo. Reinicie somente o Agent Zero principal durante um diagnóstico e
+   confirme que o controller preservou o caso. Após o reparo, confirme que o chat
+   original só é retomado quando o usuário clicar no segundo botão de autorização.
 E. Imagens: no Power, enviar PNG/JPG/WebP junto do prompt, analisar, gerar uma e várias
    imagens, editar imagem anterior e devolver inline. No Qwen, testar a ferramenta Meta AI
    somente se o usuário a pareou; sem pareamento deve falhar de forma clara e limitada.
@@ -461,7 +519,7 @@ Este segundo prompt preserva dados de uma instalação existente e exige rollbac
 
 ```text
 Atualize uma instalação existente de Ruan0205/agent-zero-chatgpt-browser-stack para
-a release pública suportada v2.12-stack.9 sem perder chats, memórias, uploads,
+a release pública suportada v2.12-stack.10 sem perder chats, memórias, uploads,
 workspaces, configurações, sessões do ChatGPT/WhatsApp ou credenciais. Esta release
 substitui as antigas para uso normal; tags antigas servem apenas para rollback.
 Você tem autorização para reiniciar apenas os serviços desta stack. Não altere
@@ -482,9 +540,9 @@ CHECKPOINT E INVENTÁRIO — OBRIGATÓRIOS ANTES DA PRIMEIRA MUDANÇA
 ATUALIZAÇÃO
 1. Busque tags/releases e notas oficiais. Faça fetch sem apagar alterações. Crie branch de
    atualização e compare migrations, Dockerfiles, plugins, prompts e schema de settings.
-   Fixe `v2.12-stack.9`, registre o SHA e rejeite arquivos misturados de tags antigas.
+   Fixe `v2.12-stack.10`, registre o SHA e rejeite arquivos misturados de tags antigas.
 2. Mescle a release pública; mantenha segredos somente no `.env`; ajuste
-   `STACK_SCHEMA_VERSION=v2.12-stack.9` sem apagar outros valores; execute
+   `STACK_SCHEMA_VERSION=v2.12-stack.10` sem apagar outros valores; execute
    `docker compose config --quiet`; construa imagens antes da parada final.
 3. Recrie serviços em ordem de dependência. Aplique migrations idempotentes. Confirme que
    a correção v2.12 que copia arquivos oficiais ausentes para `/a0` permanece funcional.
@@ -496,6 +554,11 @@ ATUALIZAÇÃO
    com estado antigo nem substitua presets personalizados fora da migração declarada.
    Remova também todo componente aposentado listado em `obsolete-paths.json`; antes de
    acrescentar um caminho, prove que ele pertence à stack e não contém dados do operador.
+   Se o `.env` antigo não tiver `REPAIR_AGENT_API_TOKEN`, gere-o com CSPRNG e guarde
+   somente no `.env` (0600). Preserve as outras credenciais. Reserve portas 50086
+   e 50087 ou configure alternativas. Suba `repair-controller`, `agent-zero-repair`
+   e `chatgpt-browser-repair`, mantendo os estados e perfis deles separados dos
+   três navegadores Power e do Utility.
 4. Não reconecte, apague ou regenere sessões. A bridge Meta AI continua opcional e sua tela
    fica em Settings > External, ao lado do WhatsApp.
 
@@ -515,6 +578,13 @@ C. Pool web: três instâncias permanentes simultâneas, cada uma em VNC separad
 D. Ferramentas: terminal Agent Zero, host root somente sob pedido, Docker, browser, desktop,
    VS Code individual, editar/executar, Hello World Docker, abrir no browser, Git commit,
    VNC, downloads, painel/auditoria de incidentes e limpeza do projeto de teste.
+   Teste o reparador: marque um chat de teste como **Chat com erro**, confirme
+   leitura de histórico/interface, negação de ferramentas antes da aprovação,
+   duas conversas de origem isoladas, pergunta antes do reparo, autorização de um
+   único turno e segunda aprovação antes de retomar o chat original. Reinicie o
+   Agent Zero principal durante a análise e confirme que o controller não perdeu
+   o vínculo. Não faça uma alteração real no host só para testar a autorização;
+   use uma correção descartável e reversível num projeto de teste.
 E. Imagem: Power recebe/análise PNG/JPG/WebP, gera uma/múltiplas imagens e edita/devolve
    inline; Qwen usa Meta AI somente se pareada e falha claramente se não estiver.
    Confirme também que uma imagem travada não é reenviada com a próxima ordem de texto:

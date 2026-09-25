@@ -4,7 +4,7 @@ FROM ghcr.io/coder/code-server:4.121.0
 
 USER root
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git python3 \
+    && apt-get install -y --no-install-recommends ca-certificates curl git nodejs npm python3 python3-pytest \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker

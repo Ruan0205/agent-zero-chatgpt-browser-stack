@@ -1,0 +1,2 @@
+### browser_bridge_status
+Read-only status of the current Agent Zero chat's `chatgpt-browser` connection. No arguments. Returns the bound ChatGPT conversation URL, VNC/browser slot, queue/busy state, latest request phase (`queued`, `sending`, `response_ready`, `rate_limited`, `media_error`, or `error`) and any provider 429 cooldown. It does not switch chats, retry, or send a message. Use it for diagnosis before deciding whether a retry is appropriate; never interpret an unmapped chat as a successful send.

@@ -1,0 +1,3 @@
+### job_status
+Read-only progress for this chat's `parallel` jobs and `code_execution_tool` terminal sessions. Use `job_id` for a specific parallel/subagent job; omit it to list active retained jobs and terminal sessions. Optional `session` filters terminal sessions. Reports state, elapsed time, last observed activity and liveness. Quiet output alone is not proof of a stall; do not cancel a job solely because `idle_seconds` is high. To cancel an actually failed job, use the documented `parallel` cancel action separately.
+If the returned `terminal_sessions` is empty, do not call `code_execution_tool` with `runtime="output"`: that action would create an idle shell and wait unnecessarily. The snapshot already answers the status question.

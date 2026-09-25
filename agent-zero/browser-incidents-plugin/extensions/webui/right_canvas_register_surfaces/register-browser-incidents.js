@@ -111,6 +111,28 @@ function render(root, state) {
   const queued = Number(state.status?.queued || 0);
   text(root.querySelector(".incident-runtime-text"), active ? `Analisando ${state.status?.currentChatName || "chat"}` : queued ? `${queued} na fila` : "Auditoria manual disponível");
   root.querySelector(".incident-runtime")?.setAttribute("data-state", active ? "busy" : "ready");
+  const selectedId = chatsStore.getSelectedChatId();
+  const repair = state.repair_sessions?.[selectedId];
+  const repairPanel = root.querySelector(".repair-panel");
+  if (repairPanel) repairPanel.hidden = !repair;
+  if (repair) {
+    const labels = {
+      diagnosing: "Analisando o histórico completo…", awaiting_approval: "Diagnóstico concluído · aguardando sua decisão",
+      answering: "Respondendo na mesma conversa…", repairing: "Reparo autorizado em execução…",
+      repaired: "Reparo encerrado · retomada do chat depende da sua autorização",
+      declined: "Reparo recusado", resuming: "Retomando o chat original…",
+      resumed: "Chat original retomado", error: "Falha no reparador", resume_error: "Falha ao retomar o chat",
+    };
+    text(root.querySelector(".repair-chat-name"), repair.chat_name || selectedId);
+    text(root.querySelector(".repair-status"), labels[repair.phase] || repair.phase);
+    text(root.querySelector(".repair-response"), repair.response || "Aguardando resposta do diagnóstico.");
+    text(root.querySelector(".repair-error"), repair.error || "");
+    root.querySelector(".repair-approve").hidden = repair.phase !== "awaiting_approval";
+    root.querySelector(".repair-decline").hidden = repair.phase !== "awaiting_approval";
+    root.querySelector(".repair-resume").hidden = repair.phase !== "repaired";
+    root.querySelector(".repair-send").disabled = ["diagnosing", "repairing", "answering", "resuming"].includes(repair.phase);
+    root.querySelector(".repair-vnc").href = `${location.protocol}//${location.hostname}:${state.repair_vnc_port || 50087}/vnc.html`;
+  }
 
   const list = root.querySelector(".incident-list");
   const empty = root.querySelector(".incident-empty");
@@ -168,7 +190,7 @@ function wire(root) {
     try {
       const contextId = chatsStore.getSelectedChatId();
       if (!contextId) throw new Error("Selecione um chat antes de solicitar o relatório.");
-      const state = await api("report_chat", {
+      const state = await api("diagnose_chat", {
         context_id: contextId,
         chat_name: chatsStore.displayName(chatsStore.getSelectedContext()),
         interface_snapshot: interfaceSnapshot(),
@@ -181,6 +203,29 @@ function wire(root) {
       button.disabled = false;
       button.textContent = previous;
     }
+  });
+  root.querySelector(".repair-send")?.addEventListener("click", async () => {
+    const input = root.querySelector(".repair-composer");
+    const message = input?.value?.trim();
+    if (!message) return;
+    try {
+      render(root, await api("repair_message", { context_id: chatsStore.getSelectedChatId(), message }));
+      input.value = "";
+    } catch (error) { text(root.querySelector(".repair-error"), error?.message || error); }
+  });
+  root.querySelector(".repair-approve")?.addEventListener("click", async () => {
+    if (!globalThis.confirm("Autorizar o reparador a modificar a stack e reiniciar serviços, se necessário?")) return;
+    try { render(root, await api("approve_repair", { context_id: chatsStore.getSelectedChatId() })); }
+    catch (error) { text(root.querySelector(".repair-error"), error?.message || error); }
+  });
+  root.querySelector(".repair-decline")?.addEventListener("click", async () => {
+    try { render(root, await api("decline_repair", { context_id: chatsStore.getSelectedChatId() })); }
+    catch (error) { text(root.querySelector(".repair-error"), error?.message || error); }
+  });
+  root.querySelector(".repair-resume")?.addEventListener("click", async () => {
+    if (!globalThis.confirm("Autorizar uma nova mensagem no chat original para continuar a tarefa?")) return;
+    try { render(root, await api("resume_source", { context_id: chatsStore.getSelectedChatId() })); }
+    catch (error) { text(root.querySelector(".repair-error"), error?.message || error); }
   });
   root.querySelector(".incident-refresh")?.addEventListener("click", () => refresh(root));
   root.querySelector(".incident-clear")?.addEventListener("click", async () => render(root, await api("clear_all")));

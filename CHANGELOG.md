@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.12-stack.10 — reparador isolado e correções acumuladas
+
+- Adiciona controller, Agent Zero e VNC exclusivos para diagnóstico de chats com erro.
+  Diagnóstico é somente leitura; reparo e retomada do chat original exigem
+  aprovações independentes. O controller sobrevive ao reinício do Agent Zero principal.
+- Persiste um vínculo reparador ↔ chat de origem e mantém a mesma conversa do
+  navegador em mensagens posteriores do mesmo caso.
+- Inclui as correções acumuladas do bridge, anexos, editor, ferramentas de
+  diagnóstico e contagem de tokens desde a release anterior.
+- Acrescenta testes para a autorização por contexto, vínculo persistente e
+  regressões da ponte. Validação ponta a ponta deve ser feita após cada instalação.
+
 ## v2.12-stack.9 — Agent Zero mais estável em tarefas longas
 
 - Preserva chats persistentes quando a API retoma uma conversa existente; somente

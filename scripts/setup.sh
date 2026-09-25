@@ -15,6 +15,7 @@ if [ ! -f .env ]; then
   vscode_token=$(openssl rand -hex 32)
   browser_notice_token=$(openssl rand -hex 32)
   journal_token=$(openssl rand -hex 32)
+  repair_token=$(openssl rand -hex 32)
   vnc_password=$(openssl rand -hex 4)
 
   sed -i \
@@ -24,11 +25,16 @@ if [ ! -f .env ]; then
     -e "s/gere-um-token-aleatorio-longo$/$vscode_token/" \
     -e "s/gere-um-token-de-aviso-aleatorio-longo$/$browser_notice_token/" \
     -e "s/gere-outro-token-aleatorio-longo$/$journal_token/" \
+    -e "s/gere-um-token-de-reparo-aleatorio-longo$/$repair_token/" \
     -e "s/Vnc12345$/$vnc_password/" \
     .env
   chmod 0600 .env
   echo ".env criado com senhas aleatórias. Edite API_KEY_OTHER, WA_PHONE e PUBLIC_HOST antes de subir."
 else
+  if ! grep -q '^REPAIR_AGENT_API_TOKEN=' .env; then
+    printf '\nREPAIR_AGENT_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env
+    chmod 0600 .env
+  fi
   echo ".env já existe; nenhuma credencial foi substituída."
 fi
 
