@@ -95,6 +95,13 @@ test('new tool image references are uploaded without replaying older tool images
  ]);
  assert.deepEqual(attachmentInputs(b),['/a0/usr/uploads/original.png','/a0/usr/uploads/current.png']);
 });
+test('a fresh tool image_url is uploaded with the active browser turn',()=>{
+ const b=body([
+  {role:'user',content:JSON.stringify({user_message:'Compare a imagem atual'})},
+  {role:'user',name:'tool',content:[{type:'text',text:'captura nova'},{type:'image_url',image_url:{url:'/a0/usr/uploads/captura.png'}}]},
+ ]);
+ assert.deepEqual(attachmentInputs(b),['/a0/usr/uploads/captura.png']);
+});
 test('attachment extraction has no arbitrary count cap',()=>{
  const paths=Array.from({length:25},(_,i)=>`/a0/usr/uploads/${i}.png`);
  assert.deepEqual(attachmentInputs(body([{role:'user',content:JSON.stringify({user_message:'Review',attachments:paths})}])),paths);
@@ -200,6 +207,12 @@ test('ordinary explanation remains free to respond without tools',()=>{
  const b=body([{role:'user',content:'{"user_message":"explique o que é uma estrutura de algoritmo"}'}]);
  assert.equal(operationalActionContext(b).requested,false);
  const s=JSON.stringify({thoughts:[],headline:'answer',tool_name:'response',tool_args:{text:'É uma organização lógica.'}});
+ assert.doesNotThrow(()=>validateAnswer(s,b));
+});
+test('repair diagnosis explicitly limited to text can finish without executing tools',()=>{
+ const b=body([{role:'user',content:'Diagnostique em modo SOMENTE LEITURA o problema do servidor. Apenas diagnóstico textual; não chame nenhuma ferramenta.'}]);
+ const s=JSON.stringify({thoughts:[],headline:'Diagnóstico',tool_name:'response',tool_args:{text:'A evidência aponta para timeout de coleta.'}});
+ assert.equal(operationalActionContext(b).requested,false);
  assert.doesNotThrow(()=>validateAnswer(s,b));
 });
 

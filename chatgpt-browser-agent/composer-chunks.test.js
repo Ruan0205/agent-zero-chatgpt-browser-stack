@@ -29,3 +29,8 @@ test('contenteditable NBSP is equivalent to a boundary space but missing text is
   assert.equal(normalizeComposerText('segment\u00a0already present'),normalizeComposerText('segment already present'));
   assert.notEqual(normalizeComposerText('segment already'),normalizeComposerText('segment already present'));
 });
+
+test('autolinked URL boundary is normalized without changing URL content',()=>{
+  assert.equal(normalizeComposerText('Abra https://example.org/path'),normalizeComposerText('Abra\nhttps://example.org/path'));
+  assert.notEqual(normalizeComposerText('Abra https://example.org/path'),normalizeComposerText('Abra https://example.org/other'));
+});

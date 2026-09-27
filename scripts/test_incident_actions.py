@@ -15,6 +15,11 @@ api.Request = type('Request', (), {})
 api.Response = type('Response', (), {})
 sys.modules['helpers'] = helpers
 sys.modules['helpers.api'] = api
+plugins = types.ModuleType('plugins')
+incidents_plugin = types.ModuleType('plugins._browser_incidents')
+incidents_plugin.completion_state = types.SimpleNamespace(unread=lambda: [], mark_read=lambda _id: None)
+sys.modules['plugins'] = plugins
+sys.modules['plugins._browser_incidents'] = incidents_plugin
 
 source = Path(__file__).resolve().parents[1] / 'agent-zero/browser-incidents-plugin/api/state.py'
 spec = importlib.util.spec_from_file_location('incident_state', source)
@@ -26,6 +31,9 @@ with tempfile.TemporaryDirectory() as directory:
     module.SETTINGS = module.ROOT / 'settings.json'
     module.INCIDENTS = module.ROOT / 'incidents.json'
     module.STATUS = module.ROOT / 'status.json'
+    module.REPAIR_SESSIONS = module.ROOT / 'repair-sessions.json'
+    module._controller_action = lambda action, _input: {'busy': []} if action == 'clear_audits' else {}
+    module._vnc_slots = lambda: []
     module.SHARED_UID = -1
     module.SHARED_GID = -1
     # The test user may not have chown permission; identity changes do not

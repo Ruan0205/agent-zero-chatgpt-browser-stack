@@ -3,13 +3,13 @@ name: agent-zero-browser-stack
 services:
   bootstrap:
     build: ./bootstrap
-    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.10}
+    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.12}
     container_name: agent-zero-bootstrap
     restart: "no"
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
       CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
-      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.10}
+      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.12}
     volumes:
       - ./scripts/bootstrap.sh:/bootstrap.sh:ro
       - ./scripts/migrate_persistent_state.py:/migrate_persistent_state.py:ro
@@ -146,6 +146,7 @@ services:
       PROVIDER_429_RETRIES: "2"
       PROVIDER_429_RETRY_DELAY_MS: "30000"
       PROVIDER_429_COOLDOWN_DIR: /provider-cooldown
+      AGENT_ZERO_NOTICE_TOKEN: ${BROWSER_POOL_NOTICE_TOKEN:?configure BROWSER_POOL_NOTICE_TOKEN in .env}
     volumes:
       - ${STACK_DATA_DIR:-./data}/browser-utility:/data
       - ${STACK_DATA_DIR:-./data}/browser:/template:ro
@@ -171,16 +172,17 @@ services:
     container_name: chatgpt-browser-repair
     restart: unless-stopped
     init: true
-    shm_size: 1gb
-    mem_limit: 1536m
-    memswap_limit: 2048m
+    shm_size: 2gb
+    mem_limit: 2200m
+    memswap_limit: 2800m
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
       MODEL_ID: chatgpt-browser
-      BROWSER_POOL_MIN: "1"
-      BROWSER_POOL_MAX: "1"
-      BROWSER_DISPLAY_COUNT: "1"
+      BROWSER_POOL_MIN: "2"
+      BROWSER_POOL_MAX: "2"
+      BROWSER_DISPLAY_COUNT: "2"
+      REPAIR_SLOT_PINNING: "true"
       BROWSER_OWNS_HISTORY: "true"
       BROWSER_REQUEST_TIMEOUT_MS: "540000"
       PROVIDER_429_RETRIES: "2"
@@ -195,6 +197,7 @@ services:
       - ${STACK_DATA_DIR:-./data}/browser-repair-workspace:/workspace
     ports:
       - "${CHATGPT_REPAIR_VNC_PORT:-50087}:6080"
+      - "${CHATGPT_REPAIR_UTILITY_VNC_PORT:-50088}:6081"
     networks: [ai-shared]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
@@ -227,6 +230,12 @@ services:
       A0_SET_mcp_server_token: ${REPAIR_AGENT_API_TOKEN:?configure REPAIR_AGENT_API_TOKEN in .env}
       REPAIR_CONTROL_DIR: /repair-control
       BROWSER_POOL_NOTICE_TOKEN: ${BROWSER_POOL_NOTICE_TOKEN:?configure BROWSER_POOL_NOTICE_TOKEN in .env}
+      CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
+      CHATGPT_VNC_2_PORT: ${CHATGPT_VNC_2_PORT:-50083}
+      CHATGPT_VNC_3_PORT: ${CHATGPT_VNC_3_PORT:-50085}
+      CHATGPT_UTILITY_VNC_PORT: ${CHATGPT_UTILITY_VNC_PORT:-50084}
+      CHATGPT_REPAIR_VNC_PORT: ${CHATGPT_REPAIR_VNC_PORT:-50087}
+      CHATGPT_REPAIR_UTILITY_VNC_PORT: ${CHATGPT_REPAIR_UTILITY_VNC_PORT:-50088}
       REPAIR_VNC_PORT: ${CHATGPT_REPAIR_VNC_PORT:-50087}
     ports:
       - "${AGENT_ZERO_REPAIR_PORT:-50086}:80"
@@ -310,6 +319,12 @@ services:
       A0_SET_timezone: ${TZ:-America/Sao_Paulo}
       VSCODE_EXEC_TOKEN: ${VSCODE_EXEC_TOKEN:?configure VSCODE_EXEC_TOKEN in .env}
       BROWSER_POOL_NOTICE_TOKEN: ${BROWSER_POOL_NOTICE_TOKEN:?configure BROWSER_POOL_NOTICE_TOKEN in .env}
+      CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
+      CHATGPT_VNC_2_PORT: ${CHATGPT_VNC_2_PORT:-50083}
+      CHATGPT_VNC_3_PORT: ${CHATGPT_VNC_3_PORT:-50085}
+      CHATGPT_UTILITY_VNC_PORT: ${CHATGPT_UTILITY_VNC_PORT:-50084}
+      CHATGPT_REPAIR_VNC_PORT: ${CHATGPT_REPAIR_VNC_PORT:-50087}
+      CHATGPT_REPAIR_UTILITY_VNC_PORT: ${CHATGPT_REPAIR_UTILITY_VNC_PORT:-50088}
       BROWSER_INCIDENTS_DIR: /a0/usr/browser-incidents
       REPAIR_AGENT_API_TOKEN: ${REPAIR_AGENT_API_TOKEN:?configure REPAIR_AGENT_API_TOKEN in .env}
       REPAIR_AGENT_URL: http://agent-zero-repair/api/api_message

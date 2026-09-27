@@ -2,10 +2,11 @@
 
 function canCollectCompletedTurn(state, stableMs, minimumMs) {
   if (!state?.isExpected || state.failed || stableMs < minimumMs) return false;
-  // A quiet text buffer alone is not completion: reasoning or tool work may
-  // continue without emitting tokens. A final action or idle generation is
-  // required before collecting the response.
-  return Boolean(state.final || !state.busy);
+  // Never infer completion merely because the current UI no longer exposes a
+  // known busy/streaming selector. ChatGPT may keep reasoning or running tools
+  // for a long time without changing visible text. Require positive, turn-local
+  // evidence that final response actions exist before collecting the response.
+  return Boolean(state.final);
 }
 
 function isDownloadTextCandidate(state) {

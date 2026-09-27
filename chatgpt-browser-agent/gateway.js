@@ -507,6 +507,35 @@ function streamError(res,error) {
 }
 
 const server = http.createServer(async (req, res) => {
+  if(req.method==='POST' && req.url==='/v1/admin/hard-reload') {
+    if(!validNoticeToken(req)) return json(res,403,{success:false,error:'Forbidden'});
+    const slots=[...pool.slots.values()].filter(slot=>slot.state==='ready');
+    const results=await Promise.all(slots.map(async slot=>{
+      const deferred=slot.busy||slot.queued>0;
+      slot.queued+=1;
+      const execute=async()=>{
+        slot.queued=Math.max(0,slot.queued-1);
+        slot.busy=true;
+        try {
+          const daemon=loadJsonFile(path.join(BROWSER_POOL_DIR,slot.id,'.chatgpt-poc-daemon.json'),{});
+          if(!Number.isInteger(daemon.port)) throw new Error('Daemon indisponível');
+          const response=await fetch(`http://127.0.0.1:${daemon.port}/hard-reload`,{
+            method:'POST',signal:AbortSignal.timeout(55000),
+          });
+          const result=await response.json();
+          if(!response.ok||!result.ok) throw new Error(result.error||`HTTP ${response.status}`);
+          if(result.before!==result.url) throw new Error(`Página mudou durante a recarga: ${result.before} → ${result.url}`);
+          return {slot:slot.id,status:'reloaded',url:result.url};
+        } finally { slot.busy=false; slot.lastUsed=Date.now(); }
+      };
+      const task=slot.tail.then(execute,execute);
+      slot.tail=task.catch(error=>console.warn(`[pool] hard reload ${slot.id}: ${error.message}`));
+      if(deferred) return {slot:slot.id,status:'queued'};
+      try { return await task; }
+      catch(error) { return {slot:slot.id,status:'error',error:error.message}; }
+    }));
+    return json(res,200,{success:true,slots:results});
+  }
   if(req.method==='POST' && req.url==='/v1/audit-chat') {
     try {
       if(!validNoticeToken(req)) return json(res,403,{success:false,error:'Invalid audit token'});

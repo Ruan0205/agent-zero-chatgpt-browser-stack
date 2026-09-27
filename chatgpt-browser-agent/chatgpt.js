@@ -128,7 +128,8 @@ function buildFullPrompt({ userPrompt, stdinData, fileData, gitData, contextData
 /**
  * Upload a local file to ChatGPT via direct CDP file-input injection.
  *
- * The ChatGPT composer always has a hidden <input id="upload-files"> in the DOM.
+ * ChatGPT renders a file input for the composer, but its id and presence
+ * change between UI releases (and sometimes while the attachment menu is open).
  * Puppeteer's uploadFile() uses the Chrome DevTools Protocol to set files on
  * the input element without needing a native file-picker dialog (which requires
  * a real user gesture and cannot be triggered programmatically in headless mode).
@@ -143,22 +144,31 @@ async function uploadFilesToChatGPT(page, uploadPaths, log) {
 
   await page.bringToFront();
 
-  const plus = await page.$('[data-testid="composer-plus-btn"]');
-  if (plus) {
+  let inputHandle = await page.$('input[type="file"]');
+  const plus = await page.$('[data-testid="composer-plus-btn"],button[aria-label="Add files and more"]');
+  if (!inputHandle && plus) {
     await plus.click();
     await new Promise(r => setTimeout(r, 350));
     const status = await page.evaluate(() => document.body.innerText);
-    await page.keyboard.press('Escape');
     const wait = status.match(/wait\s+(\d+)\s+minutes?\s+to upload again/i);
     if (wait) throw new Error(`UPLOAD_RATE_LIMIT retry_after_seconds=${Number(wait[1])*60}; provider upload quota exhausted`);
     if (/Get Plus for more uploads/i.test(status)) throw new Error('UPLOAD_RATE_LIMIT retry_after_seconds=1800; provider upload quota exhausted');
   }
 
-  // Wait for the hidden file input to be present in the DOM
-  const inputHandle = await page.waitForSelector('#upload-files', { timeout: 8_000 });
+  // Do not close the attachment menu before obtaining its transient input.
+  if (!inputHandle) {
+    inputHandle = await page.waitForSelector('input[type="file"]', { timeout: 8_000 }).catch(() => null);
+  }
+  if (!inputHandle) {
+    const controls = await page.evaluate(() => [...document.querySelectorAll('[role="menuitem"],button')]
+      .map(el => el.getAttribute('aria-label') || el.innerText || '')
+      .map(s => s.trim()).filter(Boolean).slice(-30));
+    throw new Error(`Composer file input unavailable; attachment controls: ${controls.join(' | ')}`);
+  }
 
   // CDP-level file injection — no dialog needed
   await inputHandle.uploadFile(...paths);
+  if (plus) await page.keyboard.press('Escape').catch(() => {});
 
   // uploadFile already dispatches input/change. A second change can clear it.
 
@@ -190,7 +200,7 @@ async function notifyImageUpload(contextId, message, log) {
 
 async function imageComposerState(page) {
   return page.evaluate(() => {
-    const editor=document.querySelector('#prompt-textarea');
+    const editor=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
     const scope=editor?.closest('form') || editor?.parentElement?.parentElement?.parentElement;
     const previews=[...(scope?.querySelectorAll('img')||[])].filter(img=>{
       const rect=img.getBoundingClientRect();
@@ -201,7 +211,7 @@ async function imageComposerState(page) {
         const rect=el.getBoundingClientRect();
         return rect.width>0 && rect.height>0;
       });
-    const button=document.querySelector('button[data-testid="send-button"]');
+    const button=document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
     return {
       previewCount:previews.length,
       loadedCount:previews.filter(img=>img.complete && img.naturalWidth>0).length,
@@ -215,20 +225,20 @@ async function clearFailedImageUpload(page, log) {
   // Reload only on a failed upload; keep the mapped conversation URL intact.
   await page.reload({waitUntil:'domcontentloaded',timeout:30_000}).catch(error=>
     log(`Image cleanup reload failed: ${error.message}`));
-  await page.waitForSelector('#prompt-textarea',{timeout:15_000}).catch(()=>{});
+  await page.waitForSelector('#prompt-textarea,[role="textbox"][contenteditable="true"]',{timeout:15_000}).catch(()=>{});
   await page.evaluate(() => {
     for(const button of document.querySelectorAll(
       'button[aria-label^="Remove file"],button[aria-label^="Remove image"],button[aria-label^="Remover arquivo"],button[aria-label^="Remover imagem"]'
     )) button.click();
   }).catch(()=>{});
-  if(await page.$('#prompt-textarea')) {
-    await page.focus('#prompt-textarea').catch(()=>{});
+  if(await page.$('#prompt-textarea,[role="textbox"][contenteditable="true"]')) {
+    await page.focus('#prompt-textarea,[role="textbox"][contenteditable="true"]').catch(()=>{});
     await page.keyboard.down('Control').catch(()=>{});
     await page.keyboard.press('a').catch(()=>{});
     await page.keyboard.up('Control').catch(()=>{});
     await page.keyboard.press('Backspace').catch(()=>{});
   }
-  const chars=await page.$eval('#prompt-textarea',el=>String(el.value??el.innerText??'').trim().length).catch(()=>-1);
+  const chars=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',el=>String(el.value??el.innerText??'').trim().length).catch(()=>-1);
   log(`Failed image upload cleared from mapped chat; remaining draft chars=${chars}`);
 }
 
@@ -787,6 +797,49 @@ function launchBrowser() {
   });
 }
 
+async function installTurnCompatibility(page) {
+  // The newer ChatGPT UI exposes stable message IDs through search-unit
+  // attributes instead of the former conversation-turn/author-role markers.
+  // Restore those markers on the rendered nodes so submission acknowledgement,
+  // response completion, and artifact extraction all use the same turn ID.
+  await page.evaluateOnNewDocument(() => {
+    const mark = () => {
+      for (const unit of document.querySelectorAll(
+        '[data-chatgpt-search-unit-key$=":user"],[data-chatgpt-search-unit-key$=":assistant"]'
+      )) {
+        const key=unit.getAttribute('data-chatgpt-search-unit-key') || '';
+        const role=key.endsWith(':user') ? 'user' : 'assistant';
+        const wrapper=unit.parentElement;
+        const id=(unit.getAttribute('data-chatgpt-search-message-ids') || key).trim().split(/\s+/)[0];
+        if(!wrapper || !id) continue;
+        const turnId=`conversation-turn-${id}`;
+        if(wrapper.getAttribute('data-testid')!==turnId) wrapper.setAttribute('data-testid',turnId);
+        const content=role==='user'
+          ? unit.querySelector('[data-user-message-bubble]') || unit.firstElementChild
+          : unit.querySelector('[data-markdown-text-style="assistant-message"]')
+            || unit.querySelector('[data-chatgpt-selection-message-id]');
+        if(content && content.getAttribute('data-message-author-role')!==role)
+          content.setAttribute('data-message-author-role',role);
+      }
+    };
+    let scheduled=false;
+    const schedule=()=>{
+      if(scheduled) return;
+      scheduled=true;
+      queueMicrotask(()=>{ scheduled=false; mark(); });
+    };
+    const start=()=>{
+      mark();
+      new MutationObserver(schedule).observe(document.documentElement,{
+        childList:true,subtree:true,attributes:true,
+        attributeFilter:['data-chatgpt-search-unit-key'],
+      });
+    };
+    if(document.documentElement) start();
+    else document.addEventListener('DOMContentLoaded',start,{once:true});
+  });
+}
+
 // Short prompts use one DOM insertion. Large first-turn prompts use bounded
 // browser input events: one huge execCommand transaction could freeze Chrome
 // and exhaust host memory before the message was ever submitted.
@@ -798,8 +851,8 @@ async function dismissBlockingOverlays(page, log) {
         const s=getComputedStyle(el);
         return r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none';
       };
-      const composer=document.querySelector('#prompt-textarea');
-      const send=document.querySelector('button[data-testid="send-button"]');
+      const composer=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
+      const send=document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
       const candidates=[...document.querySelectorAll('[role="dialog"], dialog, [aria-modal="true"], [data-state="open"]')]
         .filter(visible)
         // ChatGPT marks its ordinary navigation sidebar as a dialog. It does
@@ -831,7 +884,7 @@ async function dismissBlockingOverlays(page, log) {
     await new Promise(r=>setTimeout(r,350));
   }
   const blocked=await page.evaluate(()=>{
-    const send=document.querySelector('button[data-testid="send-button"]');
+    const send=document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
     if(!send) return 'send button missing';
     const r=send.getBoundingClientRect(); const top=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
     return top && !send.contains(top) ? `${top.tagName}: ${(top.innerText||'').trim().slice(0,120)}` : '';
@@ -842,7 +895,7 @@ async function dismissBlockingOverlays(page, log) {
 async function fillTextarea(page, text, log=()=>{}) {
   await page.bringToFront();
   await page.waitForFunction(()=>{
-    const el=document.querySelector('#prompt-textarea');
+    const el=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
     return el && el.getBoundingClientRect().height>0 && (el.isContentEditable || el.tagName==='TEXTAREA');
   },{timeout:60000});
   const normalized=normalizeComposerText;
@@ -855,13 +908,18 @@ async function fillTextarea(page, text, log=()=>{}) {
     // successful to CDP but React then discards the whole draft.  Require the
     // exact element to remain mounted for a short stability window first.
     await page.waitForFunction(async()=>{
-      const first=document.querySelector('#prompt-textarea');
+      const first=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
       if(!first || first.getBoundingClientRect().height<=0) return false;
+      // The newer ChatGPT editor is replaced while its home-page suggestions
+      // hydrate. Requiring that exact DOM node to survive 600 ms can time out
+      // even though a usable editor is continuously visible. The verified
+      // insertion below already detects lost text and retries safely.
+      if(first.id!=='prompt-textarea') return true;
       await new Promise(resolve=>setTimeout(resolve,600));
-      return document.querySelector('#prompt-textarea')===first && first.isConnected;
+      return document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]')===first && first.isConnected;
     },{timeout:15_000,polling:250});
 
-    await page.focus('#prompt-textarea');
+    await page.focus('#prompt-textarea,[role="textbox"][contenteditable="true"]');
     await page.keyboard.down('Control');
     await page.keyboard.press('a');
     await page.keyboard.up('Control');
@@ -878,7 +936,7 @@ async function fillTextarea(page, text, log=()=>{}) {
         // ProseMirror may replace the editor node between input events and
         // leave the selection inside the preceding chunk. Explicitly anchor
         // each continuation at the end so no bytes are reordered or lost.
-        await page.$eval('#prompt-textarea',el=>{
+        await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',el=>{
           el.focus();
           if(el.tagName==='TEXTAREA') {
             el.setSelectionRange(el.value.length,el.value.length);
@@ -898,12 +956,12 @@ async function fillTextarea(page, text, log=()=>{}) {
         let matched=false;
         for(let poll=0;poll<10;poll++) {
           await new Promise(r=>setTimeout(r,120));
-          actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>'');
+          actual=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',el=>el.value ?? el.innerText).catch(()=>'');
           if(normalized(actual)===normalized(prefix)) { matched=true; break; }
         }
         if(!matched && normalized(actual)===normalized(previous)) {
           log(`Composer discarded chunk ${i+1}; reinserting it once`);
-          await page.$eval('#prompt-textarea',el=>{
+          await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',el=>{
             el.focus();
             if(el.tagName==='TEXTAREA') el.setSelectionRange(el.value.length,el.value.length);
             else {
@@ -918,7 +976,7 @@ async function fillTextarea(page, text, log=()=>{}) {
           await page.keyboard.sendCharacter(chunks[i]);
           for(let poll=0;poll<10;poll++) {
             await new Promise(r=>setTimeout(r,120));
-            actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>'');
+            actual=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',el=>el.value ?? el.innerText).catch(()=>'');
             if(normalized(actual)===normalized(prefix)) { matched=true; break; }
           }
         }
@@ -926,7 +984,7 @@ async function fillTextarea(page, text, log=()=>{}) {
           // CDP Input.insertText can be ignored by an already-hydrated
           // contenteditable. Try its native edit transaction for this one
           // bounded chunk before restarting the whole draft.
-          const inserted=await page.$eval('#prompt-textarea',(el,value)=>{
+          const inserted=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',(el,value)=>{
             el.focus();
             if(el.tagName==='TEXTAREA') {
               const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
@@ -945,7 +1003,7 @@ async function fillTextarea(page, text, log=()=>{}) {
           log(`Composer fallback insert for chunk ${i+1}: ${inserted}`);
           for(let poll=0;poll<10;poll++) {
             await new Promise(r=>setTimeout(r,120));
-            actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>'');
+            actual=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',el=>el.value ?? el.innerText).catch(()=>'');
             if(normalized(actual)===normalized(prefix)) { matched=true; break; }
           }
         }
@@ -963,7 +1021,7 @@ async function fillTextarea(page, text, log=()=>{}) {
       }
       if(prefixFailed) continue;
     } else {
-      const inserted=await page.$eval('#prompt-textarea',(el,value)=>{
+      const inserted=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',(el,value)=>{
         el.focus();
         if(el.tagName==='TEXTAREA') {
           const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')?.set;
@@ -977,7 +1035,7 @@ async function fillTextarea(page, text, log=()=>{}) {
       if(!inserted) await page.keyboard.sendCharacter(text);
     }
     await new Promise(r=>setTimeout(r,500+attempt*500));
-    const actual=await page.$eval('#prompt-textarea',el=>el.value ?? el.innerText).catch(()=>"");
+    const actual=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',el=>el.value ?? el.innerText).catch(()=>"");
     if(normalized(actual)===normalized(text)) return;
     const a=normalized(actual), b=normalized(text);
     let offset=0; while(offset<Math.min(a.length,b.length)&&a[offset]===b[offset]) offset++;
@@ -989,7 +1047,7 @@ async function fillTextarea(page, text, log=()=>{}) {
 
 async function resetNewChatComposer(page, log) {
   await page.waitForFunction(()=>{
-    const el=document.querySelector('#prompt-textarea');
+    const el=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
     return el && el.getBoundingClientRect().height>0;
   },{timeout:60000});
   // Failed large submissions are persisted by ChatGPT as drafts. Remove only
@@ -997,7 +1055,7 @@ async function resetNewChatComposer(page, log) {
   await page.evaluate(() => {
     for (const button of document.querySelectorAll('button[aria-label^="Remove file "]')) button.click();
   });
-  await page.focus('#prompt-textarea');
+  await page.focus('#prompt-textarea,[role="textbox"][contenteditable="true"]');
   await page.keyboard.down('Control');
   await page.keyboard.press('a');
   await page.keyboard.up('Control');
@@ -1094,7 +1152,8 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         const busy=!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]');
         const completedEmpty=!!turn && turn!==before && !!currentAssistant
           && !text && !media && !busy
-          && !!latestTurn?.querySelector('button[data-testid="copy-turn-action-button"]');
+          && !!(latestTurn?.querySelector('button[data-testid="copy-turn-action-button"],button[aria-label="Copy"]')
+            || latestTurn?.parentElement?.parentElement?.querySelector('button[aria-label="Copy"]'));
         return {started,busy,completedEmpty};
       },{before:beforeTurnId,submittedUser:submittedUserTurnId}).catch(()=>null);
       if(phase?.busy&&!activityObserved) {
@@ -1163,10 +1222,12 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
       const turn = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]')).at(-1);
       const turnId=turn?.getAttribute('data-testid') || null;
       const last = turn?.querySelector('[data-message-author-role="assistant"]');
-      const codes=last?.querySelectorAll('pre code');
+      const codes=turn?.querySelectorAll('pre code');
       let envelope='';
-      if(codes?.length===1) {
-        const raw=codes[0].textContent.trim();
+      {
+        const rendered=last?.innerText?.trim() || '';
+        const raw=codes?.length===1 ? codes[0].textContent.trim()
+          : rendered.replace(/^(?:JSON)\s*\n/i,'').trim();
         try {
           const obj=JSON.parse(raw);
           if(obj && Array.isArray(obj.thoughts) && typeof obj.headline==='string'
@@ -1183,7 +1244,8 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         hasCodeBlock:!!codes?.length,
         failed:!!turn?.querySelector('button[data-testid="regenerate-thread-error-button"]'),
         busy:!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]'),
-        final:!!turn?.querySelector('button[data-testid="copy-turn-action-button"],button[data-testid="good-response-turn-action-button"],button[data-testid="bad-response-turn-action-button"]')};
+        final:!!(turn?.querySelector('button[data-testid="copy-turn-action-button"],button[data-testid="good-response-turn-action-button"],button[data-testid="bad-response-turn-action-button"],button[aria-label="Copy"],button[aria-label="Rate response"]')
+          || turn?.parentElement?.parentElement?.querySelector('button[aria-label="Copy"],button[aria-label="Rate response"]'))};
     },responseTurnId);
     if(!state.isExpected) continue;
     if(state.failed) throw new Error('ChatGPT rejected the request: '+state.text.slice(0,180));
@@ -1241,11 +1303,14 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
             const last=turn.querySelector('[data-message-author-role="assistant"]');
             if(!last) return null;
             const rendered=last.innerText.trim();
-            const blocks=last.querySelectorAll('pre code');
+            const blocks=turn.querySelectorAll('pre code');
             let raw=rendered;
             if(blocks.length===1) {
               const code=blocks[0].textContent.trim();
               try { if(JSON.parse(code)!==null) raw=code; } catch {}
+            } else if(/^JSON\s*\n/i.test(rendered)) {
+              const candidate=rendered.replace(/^JSON\s*\n/i,'').trim();
+              try { if(JSON.parse(candidate)!==null) raw=candidate; } catch {}
             }
             return {rendered,raw};
           },responseTurnId);
@@ -1266,7 +1331,7 @@ async function extractLastAssistantMessage(page) {
     const msgs = document.querySelectorAll('[data-message-author-role="assistant"]');
     if (msgs.length > 0) {
       const last = msgs[msgs.length - 1];
-      const blocks = last.querySelectorAll('pre code');
+      const blocks = last.closest('[data-testid^="conversation-turn-"]')?.querySelectorAll('pre code') || [];
       // Machine JSON must be read verbatim, not from rendered Markdown.
       if (blocks.length === 1) {
         const code = blocks[0].textContent.trim();
@@ -1275,7 +1340,15 @@ async function extractLastAssistantMessage(page) {
           if (parsed !== null && typeof parsed === 'object') return code;
         } catch { /* preserve visible response for bounded format retry */ }
       }
-      return last.innerText.trim();
+      const rendered=last.innerText.trim();
+      if(/^JSON\s*\n/i.test(rendered)) {
+        const candidate=rendered.replace(/^JSON\s*\n/i,'').trim();
+        try {
+          const parsed=JSON.parse(candidate);
+          if(parsed !== null && typeof parsed === 'object') return candidate;
+        } catch {}
+      }
+      return rendered;
     }
     // Never fall back to arbitrary prose from another turn/page.
     return null;
@@ -1294,6 +1367,7 @@ async function startDaemonProcess() {
   try {
     browser = await launchBrowser();
     page    = await browser.newPage();
+    await installTurnCompatibility(page);
 
     const initUrl = fs.existsSync(SESSION_FILE)
       ? fs.readFileSync(SESSION_FILE, 'utf8').trim()
@@ -1308,7 +1382,7 @@ async function startDaemonProcess() {
     const loggedOut = await page.evaluate(() => {
       const hasLoginBtn = [...document.querySelectorAll('button, a')]
         .some(el => ['Log in', 'Sign in'].includes(el.textContent.trim()));
-      const hasInput = !!document.querySelector('#prompt-textarea');
+      const hasInput = !!document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
       return hasLoginBtn && !hasInput;
     });
 
@@ -1338,6 +1412,28 @@ async function startDaemonProcess() {
       return send(200, { ok: true, pid: process.pid, busy, url: page.url().split('?')[0] });
     }
 
+    if (req.method === 'POST' && req.url === '/hard-reload') {
+      if (busy) return send(409, {ok:false, busy:true});
+      const before=page.url().split('?')[0];
+      if (!/^https:\/\/chatgpt\.com\//.test(before)) return send(409,{ok:false,error:'Página atual não é do ChatGPT'});
+      busy=true;
+      let session;
+      try {
+        session=await page.target().createCDPSession();
+        await session.send('Network.setCacheDisabled',{cacheDisabled:true});
+        await page.reload({waitUntil:'domcontentloaded',timeout:45000});
+        send(200,{ok:true,before,url:page.url().split('?')[0]});
+      } catch(error) { send(503,{ok:false,error:error.message,before}); }
+      finally {
+        if(session) {
+          await session.send('Network.setCacheDisabled',{cacheDisabled:false}).catch(()=>{});
+          await session.detach().catch(()=>{});
+        }
+        busy=false;
+      }
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/focus') {
       if (busy) return send(409, {ok:false, busy:true, url:page.url().split('?')[0]});
       let body='';
@@ -1363,6 +1459,45 @@ async function startDaemonProcess() {
         languages: navigator.languages,
         hasChromeObject: Boolean(globalThis.chrome),
         url: location.href,
+        composerCandidates: [...document.querySelectorAll('textarea,[contenteditable], [role="textbox"]')]
+          .slice(-15).map(el => ({
+            tag: el.tagName, id: el.id, role: el.getAttribute('role'),
+            contenteditable: el.getAttribute('contenteditable'),
+            placeholder: el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '',
+            ariaLabel: el.getAttribute('aria-label') || '',
+            testid: el.getAttribute('data-testid') || '',
+            rect: (() => { const r=el.getBoundingClientRect(); return {width:r.width,height:r.height}; })(),
+          })),
+        sendCandidates: [...document.querySelectorAll('button')]
+          .filter(el => /^(send|enviar)$/i.test((el.getAttribute('aria-label') || el.innerText || '').trim()))
+          .slice(-5).map(el => ({
+            ariaLabel: el.getAttribute('aria-label') || '',
+            testid: el.getAttribute('data-testid') || '',
+            type: el.getAttribute('type') || '',
+            disabled: el.disabled,
+            rect: (() => { const r=el.getBoundingClientRect(); return {width:r.width,height:r.height}; })(),
+          })),
+        visibleTurnLabels: [...document.querySelectorAll('*')]
+          .filter(el => el.children.length===0 && /^(You said:|ChatGPT said:)$/.test((el.textContent||'').trim()))
+          .slice(-6).map(el => {
+            const parents=[];
+            for(let node=el,depth=0;node && depth<5;node=node.parentElement,depth++) {
+              parents.push({tag:node.tagName,id:node.id,classes:String(node.className||'').slice(0,120),
+                role:node.getAttribute('role'),testid:node.getAttribute('data-testid'),
+                text:(node.innerText||'').slice(0,220),html:node.outerHTML.slice(0,500)});
+            }
+            return {label:(el.textContent||'').trim(),parents};
+          }),
+        newTurnNodes: [...document.querySelectorAll('[data-chatgpt-search-unit-key$=":user"],[data-chatgpt-search-unit-key$=":assistant"]')]
+          .slice(-4).map(el=>({key:el.getAttribute('data-chatgpt-search-unit-key'),
+            html:el.outerHTML.slice(0,3200),text:(el.innerText||'').slice(0,500)})),
+        codeCandidates: [...document.querySelectorAll('[data-markdown-copy="code-block"]')]
+          .slice(-2).map(el=>({text:(el.innerText||'').slice(0,500),
+            codeNodes:[...el.querySelectorAll('pre,code,[data-markdown-copy]')].slice(-8).map(node=>({
+              tag:node.tagName,copy:node.getAttribute('data-markdown-copy'),
+              classes:String(node.className||'').slice(0,100),
+              text:(node.textContent||'').slice(0,300),
+            }))})),
         lastAssistant: ([...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)?.innerText||'').slice(0,2000),
         lastMedia: [...([...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)?.querySelectorAll('img[src],a[href]')||[])].map(el=>({tag:el.tagName,src:el.currentSrc||el.src||el.href||'',w:el.naturalWidth||0,h:el.naturalHeight||0,download:el.getAttribute('download')})).slice(-20),
         turnSummary: [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].slice(-8).map(turn=>({
@@ -1371,6 +1506,8 @@ async function startDaemonProcess() {
           text:(turn.innerText||'').slice(0,500),
           media:[...turn.querySelectorAll('img[src],a[href]')].map(el=>({tag:el.tagName,src:el.currentSrc||el.src||el.href||'',w:el.naturalWidth||0,h:el.naturalHeight||0})).filter(item=>item.tag==='A'||item.w>=128||item.h>=128).slice(-12),
           controls:[...turn.querySelectorAll('button')].map(el=>el.getAttribute('aria-label')||el.getAttribute('data-testid')||el.innerText).filter(Boolean).slice(-12),
+          nearbyControls:[...(turn.parentElement?.parentElement?.querySelectorAll('button')||[])]
+            .map(el=>el.getAttribute('aria-label')||el.getAttribute('data-testid')||el.innerText).filter(Boolean).slice(-12),
         })),
         busy: !!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]'),
         bodyTail: (document.body?.innerText||'').slice(-5000),
@@ -1444,7 +1581,7 @@ async function startDaemonProcess() {
               waitUntil:'domcontentloaded',
               timeout:remainingTimeout(),
             });
-            await page.waitForSelector('#prompt-textarea', {
+            await page.waitForSelector('#prompt-textarea,[role="textbox"][contenteditable="true"]', {
               timeout:remainingTimeout(),
             });
           }
@@ -1459,7 +1596,7 @@ async function startDaemonProcess() {
                 waitUntil:'domcontentloaded',
                 timeout:remainingTimeout(),
               });
-              await page.waitForSelector('#prompt-textarea', {
+              await page.waitForSelector('#prompt-textarea,[role="textbox"][contenteditable="true"]', {
                 timeout:remainingTimeout(),
               });
             } else {
@@ -1475,7 +1612,7 @@ async function startDaemonProcess() {
             if(temporaryChat) await enableTemporaryChat(page,log);
             await resetNewChatComposer(page, log);
             await page.waitForFunction(() => !document.querySelector('[data-message-author-role="assistant"]')
-              && !!document.querySelector('#prompt-textarea'), {timeout:remainingTimeout()});
+              && !!document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]'), {timeout:remainingTimeout()});
           } else if (!currentUrl.startsWith('https://chatgpt.com')) {
             // Tab drifted (e.g. browser opened a link) — restore
             const sessionUrl = fs.existsSync(SESSION_FILE)
@@ -1486,7 +1623,7 @@ async function startDaemonProcess() {
               waitUntil:'domcontentloaded',
               timeout:remainingTimeout(),
             });
-            await page.waitForSelector('#prompt-textarea', {
+            await page.waitForSelector('#prompt-textarea,[role="textbox"][contenteditable="true"]', {
               timeout:remainingTimeout(),
             });
           }
@@ -1504,7 +1641,7 @@ async function startDaemonProcess() {
               await staleStop.click().catch(()=>{});
               await new Promise(r=>setTimeout(r,500));
               await page.reload({waitUntil:'domcontentloaded',timeout:remainingTimeout()});
-              await page.waitForSelector('#prompt-textarea',{timeout:remainingTimeout()});
+              await page.waitForSelector('#prompt-textarea,[role="textbox"][contenteditable="true"]',{timeout:remainingTimeout()});
               if(page.url().split('?')[0]!==chatUrl) throw new Error('Stale-generation recovery left the mapped conversation');
             }
           }
@@ -1516,7 +1653,7 @@ async function startDaemonProcess() {
           // only when the composer is still unavailable after a bounded probe.
           await dismissBlockingOverlays(page, log);
           const composerReady=await page.waitForFunction(()=>{
-            const el=document.querySelector('#prompt-textarea');
+            const el=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
             return el && el.getBoundingClientRect().height>0 && (el.isContentEditable || el.tagName==='TEXTAREA');
           },{timeout:8_000,polling:250}).then(()=>true).catch(()=>false);
           if(!composerReady) {
@@ -1524,7 +1661,7 @@ async function startDaemonProcess() {
             log('Mapped chat has no usable composer after 8s; reloading this same conversation once');
             await page.reload({waitUntil:'domcontentloaded',timeout:remainingTimeout()});
             await page.waitForFunction(()=>{
-              const el=document.querySelector('#prompt-textarea');
+              const el=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
               return el && el.getBoundingClientRect().height>0 && (el.isContentEditable || el.tagName==='TEXTAREA');
             },{timeout:remainingTimeout(),polling:250});
             if(page.url().split('?')[0]!==chatUrl) throw new Error('Composer recovery left the mapped conversation');
@@ -1544,7 +1681,7 @@ async function startDaemonProcess() {
 
           await dismissBlockingOverlays(page, log);
           await fillTextarea(page, promptToSend, log);
-          const inserted = await page.$eval('#prompt-textarea', el => el.value ?? el.innerText);
+          const inserted = await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]', el => el.value ?? el.innerText);
           // ProseMirror renders paragraphs as doubled line breaks in innerText.
           // JSON transcript newlines are escaped, so normalize only DOM line
           // separators, not spaces/indentation inside transcript values.
@@ -1567,7 +1704,7 @@ async function startDaemonProcess() {
               log('Waiting for send button to become enabled (file upload in progress)...');
               await page.waitForFunction(
                 () => {
-                  const btn = document.querySelector('button[data-testid="send-button"]');
+                  const btn = document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
                   return btn && !btn.disabled;
                 },
                 { timeout: 60_000 }
@@ -1591,19 +1728,19 @@ async function startDaemonProcess() {
           // Enter on long-lived chats: after a provider rejection the editor can
           // look focused while ProseMirror consumes Enter as an edit operation.
           await page.waitForFunction(() => {
-            const button=document.querySelector('button[data-testid="send-button"]');
+            const button=document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
             return button && !button.disabled;
           },{timeout:15000,polling:250});
           const capacityRejection=await readProviderRejection(page);
           if(capacityRejection) throw new Error(`ChatGPT rejected the request: ${capacityRejection}`);
           await dismissBlockingOverlays(page, log);
-          await page.click('button[data-testid="send-button"]');
+          await page.click('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
           log(requestUploads.length
             ? 'Submitted via DOM send action after attachment and composer refresh'
             : 'Submitted via verified DOM send action');
           const waitForSubmissionAck=()=>page.waitForFunction(
             ({startPath,beforeUser,temporaryChat}) => {
-              const editor = document.querySelector('#prompt-textarea');
+              const editor = document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
               const text = (editor?.value ?? editor?.innerText ?? '').trim();
               const currentUser=[...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null;
               // Composer clearing alone is insufficient: a popup may consume a
@@ -1618,7 +1755,7 @@ async function startDaemonProcess() {
           let acknowledged=await waitForSubmissionAck();
           if(!acknowledged) {
             const retryState=await page.evaluate(beforeUser=>{
-              const editor=document.querySelector('#prompt-textarea');
+              const editor=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
               const currentUser=[...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null;
               return {composerChars:String(editor?.value ?? editor?.innerText ?? '').trim().length,currentUser,beforeUser};
             },beforeTurn.user).catch(()=>({composerChars:0,currentUser:null,beforeUser:beforeTurn.user}));
@@ -1629,7 +1766,7 @@ async function startDaemonProcess() {
             if(retryState.composerChars>0 && retryState.currentUser===retryState.beforeUser) {
               log(`Send click was ignored with ${retryState.composerChars} draft chars; retrying once via focused Enter`);
               await dismissBlockingOverlays(page,log);
-              await page.focus('#prompt-textarea');
+              await page.focus('#prompt-textarea,[role="textbox"][contenteditable="true"]');
               await page.keyboard.press('Enter');
               acknowledged=await waitForSubmissionAck();
             }
@@ -1639,7 +1776,7 @@ async function startDaemonProcess() {
             if(!imageUploadReady(state,imageCount)) {
               log('Image preview became pending after send; waiting for it before one final send attempt');
               await waitForImageUploads(page,imageCount,contextId,imageUploadDeadline,log);
-              await page.click('button[data-testid="send-button"]');
+              await page.click('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
               acknowledged=await waitForSubmissionAck();
             }
           }
@@ -1648,8 +1785,8 @@ async function startDaemonProcess() {
             const delayedRejection=await readProviderRejection(page);
             if(delayedRejection) throw new Error(`ChatGPT rejected the request: ${delayedRejection}`);
             const state = await page.evaluate(() => {
-              const editor = document.querySelector('#prompt-textarea');
-              const sendButton = document.querySelector('button[data-testid="send-button"]');
+              const editor = document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
+              const sendButton = document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
               return {
                 path: location.pathname,
                 composerChars: String(editor?.value ?? editor?.innerText ?? '').length,

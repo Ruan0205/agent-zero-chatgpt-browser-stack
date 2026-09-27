@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.12-stack.12 — compatibilidade com a interface atual e operação visível
+
+- Reconhece a estrutura atual dos turnos e do editor do ChatGPT, incluindo upload e botão de envio; não declara uma resposta concluída apenas porque um indicador de atividade sumiu momentaneamente.
+- Preserva prompts longos em transporte multipartes e corrige casos de diagnóstico somente leitura e de URL autolinkada no editor.
+- Separa navegador principal e Utility do reparador em duas VNCs fixas, evitando que a compactação navegue para fora do chat em análise.
+- Acrescenta status das VNCs, recarga sem cache, painel de melhoria, ponto azul para respostas finais não lidas e ordenação de chats que respeita pins.
+- Inclui migração e instruções de atualização desde `v2.12-stack.9`; não inclui credenciais, sessões, chats nem personalizações específicas do servidor original.
+
 ## v2.12-stack.11 — foco no erro atual e anexos sem reenvio duplicado
 
 - Exige uma descrição do erro atual antes de iniciar o diagnóstico manual; consulta

@@ -135,6 +135,15 @@ class BrowserPool {
 
   async _acquire(conversationKey,metadata={}) {
     let slot=null;
+    if(process.env.REPAIR_SLOT_PINNING==='true' && conversationKey) {
+      // The isolated repair instance must never let auxiliary summarization
+      // navigate away from the browser page of an active repair chat.
+      const target=conversationKey==='utility-dedicated-chat-v1' ? 'browser-2' : 'browser-1';
+      if(this.assignments[conversationKey]!==target) {
+        this.assignments[conversationKey]=target;
+        this.saveAssignments(this.assignments);
+      }
+    }
     const assigned=this.assignments[conversationKey];
     if(assigned) slot=this._ensureSlot(assigned,this._numberFromId(assigned)<=this.minSize);
 

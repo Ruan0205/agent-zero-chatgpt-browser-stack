@@ -15,9 +15,17 @@ function activityScore(row, contexts, activity) {
   return score;
 }
 
-export function sortRowsByActivity(rows, contexts, activity) {
-  return [...(rows || [])].sort((left, right) =>
-    activityScore(right, contexts, activity) - activityScore(left, contexts, activity)
-    || String(right?.created_at || "").localeCompare(String(left?.created_at || "")),
-  );
+export function sortRowsByActivity(rows, contexts, activity, pins = {}) {
+  return [...(rows || [])].sort((left, right) => {
+    // The recent-activity extension may run after Pin to Top. Never let a
+    // recent unpinned chat displace a pinned chat, regardless of load order.
+    const leftPin = Number(pins?.[left?.id]);
+    const rightPin = Number(pins?.[right?.id]);
+    const leftPinned = Number.isFinite(leftPin) && leftPin > 0;
+    const rightPinned = Number.isFinite(rightPin) && rightPin > 0;
+    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+    if (leftPinned && rightPinned) return leftPin - rightPin;
+    return activityScore(right, contexts, activity) - activityScore(left, contexts, activity)
+      || String(right?.created_at || "").localeCompare(String(left?.created_at || ""));
+  });
 }

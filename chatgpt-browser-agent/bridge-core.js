@@ -46,7 +46,9 @@ function attachmentInputs(body, priorState = null, options = {}) {
   // instead of an inlined base64 URL.  Upload only the newest such tool event;
   // historical tool results must not be replayed as fresh attachments.
   const latest=messages.at(-1);
-  if(latest && latest!==latestHuman && /\[A0_BROWSER_ATTACHMENTS_JSON\]/.test(textContent(latest.content)))
+  const directImage=Array.isArray(latest?.content) && latest.content.some(part=>
+    part && typeof part==='object' && ['image_url','input_image'].includes(part.type));
+  if(latest && latest!==latestHuman && (directImage || /\[A0_BROWSER_ATTACHMENTS_JSON\]/.test(textContent(latest.content))))
     selected.push(latest);
   const refs=[];
   const seen=new Set();
@@ -439,7 +441,11 @@ function operationalActionContext(body) {
   const text=(shortContinuation && previous ? previous.userText+'\n'+latest.userText : latest.userText);
   const explicitAction=/\b(?:instale|configure|aplique|altere|modifique|edite|corrija|conserte|resolva|crie|gere|implemente|execute|rode|inicie|reinicie|pare|desligue|remova|apague|suba|publique|abra|acesse|navegue|redirecione|teste|valide|verifique|confirme|otimize|investigue|diagnostique|fa(?:ça|ca)|install|configure|apply|change|modify|edit|fix|solve|create|generate|implement|execute|run|start|restart|stop|remove|delete|deploy|publish|open|navigate|test|validate|verify|optimi[sz]e|investigate|diagnose)\b/i.test(text);
   const concreteTarget=/\b(?:server|servidor|máquina|maquina|host|docker|container|serviço|servico|processo|arquivo|pasta|código|codigo|projeto|aplicação|aplicacao|site|página|pagina|url|navegador|browser|terminal|banco|rede|configuração|configuracao|modelo|ferramenta|integração|integracao|infraestrutura|file|folder|code|project|application|service|process|database|network|configuration|model|tool|integration|infrastructure)\b/i.test(text);
-  const requested=explicitAction && (concreteTarget || shortContinuation);
+  // A report about an earlier test is not a new instruction to run tools when
+  // the user expressly asks for a textual diagnosis and forbids tool calls.
+  const textualReportOnly=/\b(?:apenas|somente)\b[^.!?\n]{0,65}\bdiagn[oó]stico\s+textual\b/i.test(text)
+    && /\b(?:não|nao)\s+(?:chame|use|execute)\s+(?:nenhuma?\s+)?(?:ferramentas?|tools?)\b/i.test(text);
+  const requested=explicitAction && (concreteTarget || shortContinuation) && !textualReportOnly;
   const validationRequested=/\b(?:teste|testar|valide|validar|verifique|verificar|confirme|confirmar|garanta|garantir|comprove|test|validate|verify|confirm|ensure|prove)\b/i.test(text);
   const after=messages.slice(latest.index+1).map(m=>m.content).join('\n');
   const toolNames=[...after.matchAll(/"tool_name"\s*:\s*"([^"]+)"/gi)].map(m=>m[1]).filter(n=>n!=='response');
@@ -448,7 +454,8 @@ function operationalActionContext(body) {
   const requiredTools=[];
   const vscodeTerminal=/\b(?:terminal\s+(?:integrado\s+)?(?:do|de)\s+vs\s*code|vs\s*code[^.!?\n]{0,60}\bterminal)\b/i.test(text);
   const explicitShellRequest=/\b(?:execute|executar|rode|rodar|run)\s+(?:(?:o|um|the|a)\s+)?(?:comando|command|script)\b|\b(?:use|abra|open)\s+(?:(?:o|the)\s+)?(?:terminal|shell)\b/i.test(text);
-  if(/\bcode_execution_tool\b/i.test(text) || (!vscodeTerminal && explicitShellRequest)) requiredTools.push('code_execution_tool');
+  const shellNegated=/\b(?:não|nao|do\s+not|don't)\s+(?:use|abra|execute|rode|run|open)\s+(?:(?:o|um|the|a)\s+)?(?:terminal|shell|comando|command|script)\b/i.test(text);
+  if(!shellNegated && (/\bcode_execution_tool\b/i.test(text) || (!vscodeTerminal && explicitShellRequest))) requiredTools.push('code_execution_tool');
   // A locally generated file is not delivered merely because a file:// link
   // appears in prose. Require the publication tool whenever the latest user
   // explicitly asks for a real downloadable attachment. This is especially
@@ -592,10 +599,9 @@ OPERATIONAL COMPLETION GATE FOR THIS TURN:
     : '';
   const renderPrompt=items=>`${contract}${references}${taskAnchor}${operationalActionBlock}${browserActionBlock}${sessionNotice ? `\n${sessionNotice}` : ''}\n\nCALLER TRANSCRIPT${deltaMode ? ' DELTA' : ''} (JSON, in chronological order):\n${JSON.stringify(items)}${toolsBlock}\n\nReturn only the next assistant response for THIS transcript. Never resume another browser conversation.`;
   let prompt = renderPrompt(transcript);
-  // After several turns the ChatGPT rich-text composer can stop accepting
-  // input at roughly 7 KiB even though it accepted a larger first message.
-  // The mapped browser chat already owns the full task/history. Bound only
-  // appended tool-result envelopes; never truncate a new human request.
+  // Keep routine appended results small, while preserving long results for
+  // the gateway's numbered multipart transport. A single composer message
+  // has a size limit; the complete mapped turn does not.
   if(browserOwnsHistory && priorState && transcript.length
     && transcript.every(message=>message.role!=='user' || !isCurrentUserMessage(message) || textContent(message.content).length<=1200)
     && prompt.length>6500) {
@@ -605,7 +611,7 @@ OPERATIONAL COMPLETION GATE FOR THIS TURN:
       prompt=renderPrompt(transcript);
       if(prompt.length<=6500) break;
     }
-    if(prompt.length>6500)
+    if(prompt.length>6500 && !mainCall)
       throw new Error(`Mapped browser turn exceeds the established chat composer limit (${prompt.length}/6500 characters); no user message or tool output was submitted`);
   }
   const providerSafeLimit=Math.min(limit,64000);
@@ -654,6 +660,10 @@ function validateAnswer(answer, body, options = {}) {
   // contain any protocol key remain subject to the strict validator below.
   const latestUser=[...(body.messages||[])].reverse().find(message=>message.role==='user' && isCurrentUserMessage(message));
   const latestUserText=latestUser ? extractedUserText(textContent(latestUser.content)) : '';
+  // The isolated repairer's pre-approval turn receives all evidence in its
+  // prompt and is intentionally forbidden from running operational tools.
+  // Requiring those tools here turns a valid read-only diagnosis into HTTP 500.
+  const repairDiagnosis=/^Diagnostique em modo SOMENTE LEITURA\b/i.test(latestUserText);
   const explicitJsonResponse=/\b(?:json|objeto\s+json)\b/i.test(latestUserText)
     && /\b(?:responda|retorne|devolva|sa[ií]da|respond|return|output)\b/i.test(latestUserText);
   const protocolKeys=['thoughts','headline','tool_name','tool_args'];
@@ -693,15 +703,15 @@ function validateAnswer(answer, body, options = {}) {
     if (/^\s*\{\s*"/.test(p.tool_args.text) && !explicitJsonResponse)
       throw new Error('Final response is nested JSON instead of Markdown');
     const browserIntent=browserActionContext(body);
-    if(browserIntent.requested && !browserIntent.attempted)
+    if(!repairDiagnosis && browserIntent.requested && !browserIntent.attempted)
       throw new Error('Browser action requested but no browser tool call was attempted; call skills_tool/load if needed, then browser, before responding');
     const operationIntent=operationalActionContext(body);
-    if(operationIntent.requested && !operationIntent.attempted)
+    if(!repairDiagnosis && operationIntent.requested && !operationIntent.attempted)
       throw new Error('Operational task requested but no Agent Zero tool was attempted; execute an appropriate documented tool before responding');
     const missingRequired=operationIntent.requiredTools.filter(name=>!operationIntent.attemptedTools.includes(name));
-    if(operationIntent.requested && missingRequired.length)
+    if(!repairDiagnosis && operationIntent.requested && missingRequired.length)
       throw new Error('Required tool was not attempted for the latest user task: '+missingRequired.join(', '));
-    if(operationIntent.requested && operationIntent.validationRequested && !operationIntent.evidence)
+    if(!repairDiagnosis && operationIntent.requested && operationIntent.validationRequested && !operationIntent.evidence)
       throw new Error('Verification was requested but no real tool result is present; inspect actual output/state before responding');
   }
   if (p.tool_name==='code_execution_tool') {

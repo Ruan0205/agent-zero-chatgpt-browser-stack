@@ -29,7 +29,15 @@ function composerChunks(text, maxUnits=1024) {
 // it visible. The text is semantically identical; missing or reordered
 // characters still fail the full-string verification.
 function normalizeComposerText(text) {
-  return String(text).replace(/\u00a0/g,' ').replace(/\r/g,'').replace(/\n+/g,'\n').trim();
+  return String(text)
+    .replace(/\u00a0/g,' ')
+    .replace(/\r/g,'')
+    // ChatGPT's rich-text editor may auto-link a bare URL and insert a
+    // separating space or visual line break immediately before it. Compare
+    // the URL itself exactly while canonicalizing only that boundary.
+    .replace(/[ \t\n]+(?=https?:\/\/)/g,'')
+    .replace(/\n+/g,'\n')
+    .trim();
 }
 
 module.exports={composerChunks,normalizeComposerText};

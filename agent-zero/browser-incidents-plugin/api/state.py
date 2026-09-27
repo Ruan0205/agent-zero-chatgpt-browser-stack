@@ -8,6 +8,7 @@ import urllib.request
 from pathlib import Path
 
 from helpers.api import ApiHandler, Request, Response
+from plugins._browser_incidents import completion_state
 
 
 ROOT = Path(os.environ.get("BROWSER_INCIDENTS_DIR", "/a0/usr/browser-incidents"))
@@ -19,6 +20,47 @@ SHARED_UID = int(os.environ.get("BROWSER_INCIDENTS_UID", "1000"))
 SHARED_GID = int(os.environ.get("BROWSER_INCIDENTS_GID", "1000"))
 CONTROLLER_URL = os.environ.get("REPAIR_CONTROLLER_URL", "http://repair-controller:8099/action")
 CONTROLLER_TOKEN = os.environ.get("REPAIR_AGENT_API_TOKEN", "")
+BRIDGE_TOKEN = os.environ.get("BROWSER_POOL_NOTICE_TOKEN") or os.environ.get("AGENT_ZERO_NOTICE_TOKEN", "")
+
+
+def _hard_reload_browsers():
+    if not BRIDGE_TOKEN:
+        raise RuntimeError("Token da ponte não configurado")
+    results = []
+    for name in ("chatgpt-browser-agent", "chatgpt-browser-utility", "chatgpt-browser-repair"):
+        request = urllib.request.Request(
+            f"http://{name}:8000/v1/admin/hard-reload", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json", "X-Browser-Pool-Token": BRIDGE_TOKEN},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            results.append({"bridge": name, **result})
+        except (urllib.error.URLError, ValueError, TimeoutError) as error:
+            results.append({"bridge": name, "success": False, "error": str(error)[:200]})
+    return {"success": True, "reload_results": results}
+
+
+def _vnc_slots():
+    """Live, read-only status; never infer availability from a static port."""
+    services = (
+        ("http://chatgpt-browser-agent:8000/health", (("Principal 1", int(os.environ.get("CHATGPT_VNC_PORT", "50081"))), ("Principal 2", int(os.environ.get("CHATGPT_VNC_2_PORT", "50083"))), ("Principal 3", int(os.environ.get("CHATGPT_VNC_3_PORT", "50085"))))),
+        ("http://chatgpt-browser-utility:8000/health", (("Utility", int(os.environ.get("CHATGPT_UTILITY_VNC_PORT", "50084"))),)),
+        ("http://chatgpt-browser-repair:8000/health", (("Reparador", int(os.environ.get("CHATGPT_REPAIR_VNC_PORT", "50087"))), ("Utility reparador", int(os.environ.get("CHATGPT_REPAIR_UTILITY_VNC_PORT", "50088"))))),
+    )
+    slots = []
+    for url, displays in services:
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as response:
+                health = json.loads(response.read().decode("utf-8"))
+            browser_slots = health.get("slots", [])
+        except (OSError, ValueError, TypeError):
+            browser_slots = []
+        for index, (label, port) in enumerate(displays):
+            slot = browser_slots[index] if index < len(browser_slots) else {}
+            status = "busy" if slot.get("busy") else "ready" if slot.get("state") == "ready" else "offline"
+            slots.append({"label": label, "port": port, "status": status})
+    return slots
 
 
 def _read(path: Path, fallback):
@@ -55,16 +97,21 @@ def _snapshot():
     if not isinstance(incidents, list):
         incidents = []
     incidents.sort(key=lambda item: str(item.get("createdAt", "")), reverse=True)
+    repairs = _read(REPAIR_SESSIONS, {})
+    if not isinstance(repairs, dict):
+        repairs = {}
     return {
         "success": True,
         "enabled": settings.get("enabled") is not False,
         "incidents": incidents,
         "status": status,
-        "repair_sessions": _read(REPAIR_SESSIONS, {}),
+        "repair_sessions": repairs,
+        "unread_completed_chats": completion_state.unread(),
         "repair_vnc_port": int(os.environ.get("REPAIR_VNC_PORT", "50087")),
+        "vnc_slots": _vnc_slots(),
         "counts": {
-            "total": len(incidents),
-            "open": sum(1 for item in incidents if not item.get("resolved")),
+            "total": len(incidents) + len(repairs),
+            "open": sum(1 for item in incidents if not item.get("resolved")) + len(repairs),
             "resolved": sum(1 for item in incidents if item.get("resolved")),
         },
     }
@@ -74,7 +121,9 @@ def _controller_action(action: str, input: dict):
     if not CONTROLLER_TOKEN:
         raise RuntimeError("Token do reparador não configurado")
     payload = {"action": action, "context_id": input.get("context_id", "")}
-    if action == "diagnose_chat":
+    if action == "request_improvement":
+        payload["description"] = input.get("description", "")
+    elif action == "diagnose_chat":
         payload["chat_name"] = input.get("chat_name", "")
         payload["error_description"] = input.get("error_description", "")
         payload["interface_snapshot"] = input.get("interface_snapshot", {})
@@ -94,6 +143,7 @@ def _controller_action(action: str, input: dict):
         raise RuntimeError(f"Reparador indisponível: {error.reason}") from error
     if not result.get("success"):
         raise RuntimeError(str(result.get("error") or "Ação recusada"))
+    return result.get("session", {})
 
 
 class State(ApiHandler):
@@ -102,7 +152,17 @@ class State(ApiHandler):
         action = str(input.get("action", "get"))
         if action == "get":
             return _snapshot()
-        if action in {"diagnose_chat", "report_chat", "repair_message", "approve_repair",
+        if action == "unread_only":
+            return {"success": True, "unread_completed_chats": completion_state.unread()}
+        if action == "hard_reload_browsers":
+            return _hard_reload_browsers()
+        if action == "mark_read":
+            try:
+                completion_state.mark_read(str(input.get("context_id", "")))
+            except ValueError as error:
+                return {"success": False, "error": str(error)}
+            return {"success": True, "unread_completed_chats": completion_state.unread()}
+        if action in {"diagnose_chat", "report_chat", "request_improvement", "repair_message", "approve_repair",
                       "decline_repair", "resume_source"}:
             try:
                 _controller_action("diagnose_chat" if action == "report_chat" else action, input)
@@ -131,7 +191,19 @@ class State(ApiHandler):
             _write(INCIDENTS, remaining)
             return _snapshot()
         if action == "clear_all":
+            try:
+                outcome = _controller_action("clear_audits", {})
+            except (OSError, RuntimeError, ValueError) as error:
+                return {"success": False, "error": str(error)}
             _write(INCIDENTS, [])
+            snapshot = _snapshot()
+            snapshot["preserved_active_audits"] = len(outcome.get("busy", []))
+            return snapshot
+        if action == "remove_audit":
+            try:
+                _controller_action("remove_audit", input)
+            except (OSError, RuntimeError, ValueError) as error:
+                return {"success": False, "error": str(error)}
             return _snapshot()
         if action == "remove":
             incident_id = str(input.get("id", ""))

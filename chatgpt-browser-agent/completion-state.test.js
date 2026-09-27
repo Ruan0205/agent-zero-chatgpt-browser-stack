@@ -8,7 +8,7 @@ test('unchanged text is not final while the model is visibly still thinking',()=
 });
 test('a finished turn is collected promptly without a fixed long wait',()=>{
   assert.equal(canCollectCompletedTurn({isExpected:true,busy:false,final:true},2_000,2_000),true);
-  assert.equal(canCollectCompletedTurn({isExpected:true,busy:false,final:false},2_000,2_000),true);
+  assert.equal(canCollectCompletedTurn({isExpected:true,busy:false,final:false},2_000,2_000),false);
 });
 test('a stale busy control is outweighed only by a final response action',()=>{
   assert.equal(canCollectCompletedTurn({isExpected:true,busy:true,final:true},2_000,2_000),true);
