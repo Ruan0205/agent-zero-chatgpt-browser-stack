@@ -1,5 +1,5 @@
 name: _chat_usage
-title: Uso por chat e aviso sonoro
-description: Mostra tokens por conversa e toca um aviso discreto ao receber resposta final.
-version: 1.0.0
+title: Uso de tokens e aviso sonoro
+description: Mostra tokens por conversa, resumo de Kimi e ChatGPT Browser na página inicial e aviso discreto ao receber resposta final.
+version: 1.1.0
 always_enabled: true

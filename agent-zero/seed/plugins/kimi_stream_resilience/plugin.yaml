@@ -1,0 +1,5 @@
+name: kimi_stream_resilience
+title: Kimi response resilience
+description: Retries transient, incomplete Kimi responses before any partial tool call is exposed to Agent Zero.
+version: 1.0.0
+always_enabled: true

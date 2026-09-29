@@ -1,0 +1,79 @@
+<section class="a0-usage-overview" x-data="usageDashboard()" x-init="refresh()" x-effect="$store.welcomeStore.isVisible && refreshIfStale()" aria-label="Uso de tokens e equivalência de custo">
+  <div class="a0-usage-head">
+    <div class="a0-usage-head-icon" aria-hidden="true">◈</div>
+    <div class="a0-usage-head-copy">
+    <div class="a0-usage-eyebrow">VISÃO GERAL DE USO</div>
+      <h2>Seus tokens, em perspectiva</h2>
+    <p>Mês atual e histórico · <span x-text="formatTokens(chatsCounted)"></span> chats com contagem</p>
+    </div>
+    <button type="button" class="a0-usage-refresh" @click="refresh()" :disabled="loading" aria-label="Atualizar uso" :title="loading ? 'Atualizando…' : 'Atualizar uso'">↻ <span x-text="loading ? 'Atualizando' : 'Atualizar'"></span></button>
+  </div>
+
+  <p class="a0-usage-error" x-show="error" x-text="error" role="alert"></p>
+  <template x-for="scope in scopes" :key="scope.id">
+    <section class="a0-usage-period" :aria-label="scope.title">
+      <div class="a0-usage-period-heading"><h3 x-text="scope.title"></h3><p x-text="scope.subtitle"></p></div>
+      <div class="a0-usage-grid">
+        <template x-for="card in scope.cards" :key="scope.id + '-' + card.id">
+          <article class="a0-usage-card" :class="'is-' + card.id">
+            <div class="a0-usage-card-top"><span class="a0-usage-dot"></span><div><h3 x-text="card.title"></h3><p x-text="card.caption"></p></div></div>
+            <div class="a0-usage-token-line">
+              <div><small>ENTRADA</small><strong x-text="formatTokens(card.usage.input)"></strong></div>
+              <div><small>SAÍDA</small><strong x-text="formatTokens(card.usage.output)"></strong></div>
+            </div>
+            <div class="a0-usage-total"><span>Total de tokens</span><strong x-text="formatTokens(card.usage.total)"></strong></div>
+            <div class="a0-usage-cost"><span x-text="card.costLabel"></span><strong :class="card.hasRange ? 'is-range' : ''" x-text="card.hasRange ? `${formatMoney(card.costMin)} a ${formatMoney(card.costMax)}` : formatMoney(card.cost)"></strong></div>
+            <div class="a0-usage-budget-title">Comparação ilustrativa · semana × 4<span x-show="scope.months > 1" x-text="` × ${scope.months} meses`"></span>:</div>
+            <template x-for="budget in budgets" :key="budget">
+              <div class="a0-usage-budget">
+                <div class="a0-usage-budget-copy"><span x-text="formatMoney(budget)"></span><b x-text="quotaText(card.usage.total,budget,scope.months)"></b></div>
+                <small class="a0-usage-quota-label" x-text="quotaLabel(budget,scope.months)"></small>
+                <div class="a0-usage-track"><span :style="'width:' + barWidth(card.usage.total,budget,scope.months)"></span></div>
+              </div>
+            </template>
+          </article>
+        </template>
+      </div>
+    </section>
+  </template>
+
+  <div class="a0-usage-foot">
+    <p><strong>Como ler:</strong> os tokens consumidos são comparados com uma <strong>referência ilustrativa, não uma franquia prevista ou oficial</strong>. O mês usa semana × 4; o histórico usa semana × 4 × meses desde o primeiro chat contabilizado. Esses percentuais não indicam saldo real da assinatura nem permitem prever quando ela atingirá o limite. No cartão Kimi, a comparação não representa o limite do serviço Kimi.</p>
+    <p x-show="inferredLegacyTokens > 0"><strong x-text="formatTokens(inferredLegacyTokens)"></strong> tokens anteriores ao registro por modelo foram atribuídos por vínculo de chat (principalmente Browser). Essa parcela é estimada e pode incluir chamadas utilitárias; o total geral não muda.</p>
+    <p x-show="Number(unattributed.total || 0) > 0">Há <strong x-text="formatTokens(unattributed.total)"></strong> tokens sem modelo identificável, mostrados só no cartão geral. A faixa de custo de API é hipotética.</p>
+    <p x-show="unreadableChats > 0" x-text="`${unreadableChats} chat(s) não puderam ser lidos; o total pode estar incompleto.`"></p>
+    <details class="a0-usage-assumptions"><summary>Premissas da estimativa e referências semanais</summary>
+      <p><strong>Cenário inicial:</strong> 55 mensagens locais por janela (ponto médio de 10–100 no GPT-5.6 Sol), × 20.000 tokens de entrada + saída por mensagem, × 7 janelas por semana (uma janela de uso de 5h por dia). Os 20.000 tokens e o ritmo de uso são hipóteses deste painel, não medições da OpenAI. Referências: Plus ≈ 7,7 milhões/semana; Pro 5× ≈ 38,5 milhões; Pro 20× ≈ 154 milhões. Por mês (× 4): 30,8 / 154 / 616 milhões.</p>
+      <div class="a0-usage-settings">
+        <template x-for="budget in budgets" :key="budget">
+          <label><span x-text="`${formatMoney(budget)} · tokens por semana`"></span><input type="number" min="0" step="1" x-model.number="weeklyTokens[budget]" @change="saveWeeklyTokens()" placeholder="Não publicado oficialmente"></label>
+        </template>
+      </div>
+      <p>Você pode ajustar as referências acima; elas ficam salvas neste navegador. A <a href="https://learn.chatgpt.com/docs/pricing" target="_blank" rel="noopener noreferrer">documentação oficial da OpenAI</a> fornece faixas de mensagens locais por 5h para Work/Codex, não quotas semanais de tokens do ChatGPT Browser. Há limites semanais independentes, e cache, raciocínio e modelo alteram o consumo. Multiplicar janelas não garante capacidade disponível.</p>
+    </details>
+    <details class="a0-usage-assumptions"><summary>Ajustar câmbio e preços de referência</summary>
+      <div class="a0-usage-settings">
+        <label>USD → BRL <input type="number" min="0" step="0.001" x-model.number="pricing.usdBrl" @change="savePricing()"></label>
+        <label>ChatGPT entrada / 1M (USD) <input type="number" min="0" step="0.01" x-model.number="pricing.browserInput" @change="savePricing()"></label>
+        <label>ChatGPT saída / 1M (USD) <input type="number" min="0" step="0.01" x-model.number="pricing.browserOutput" @change="savePricing()"></label>
+        <label>Kimi entrada / 1M (USD) <input type="number" min="0" step="0.01" x-model.number="pricing.kimiInput" @change="savePricing()"></label>
+        <label>Kimi saída / 1M (USD) <input type="number" min="0" step="0.01" x-model.number="pricing.kimiOutput" @change="savePricing()"></label>
+      </div>
+      <p>Referências iniciais: <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener noreferrer">OpenAI chat-latest</a> (US$ 5/30 por 1M), <a href="https://forum.moonshot.ai/t/kimi-k3-is-here-our-most-capable-model/480" target="_blank" rel="noopener noreferrer">Kimi-K3</a> (US$ 3/15 sem cache) e USD/BRL 5,206 em 28/09/2026. O serviço we64 é cobrado por plano/chamadas, não por esses tokens.</p>
+    </details>
+  </div>
+</section>
+<script type="module">
+  import { createUsageDashboard } from '/plugins/_chat_usage/webui/usage-dashboard.mjs';
+  window.usageDashboard = createUsageDashboard;
+</script>
+<style>
+.a0-usage-overview{grid-column:1/-1;min-width:0;padding:22px;border:1px solid color-mix(in srgb,var(--color-border,#364152) 60%,#7565ef 40%);border-radius:22px;background:linear-gradient(135deg,#241b47 0%,#142238 52%,#10282a 100%);color:#eaf1ff;box-shadow:0 20px 55px #0003;margin:0 0 18px}
+x-extension[id="welcome-actions-start"]{display:contents}
+.a0-usage-head{display:flex;align-items:center;gap:16px;margin-bottom:20px}.a0-usage-head-icon{display:grid;place-items:center;width:46px;height:46px;flex:none;border-radius:15px;background:linear-gradient(135deg,#7660ff,#26b6c2);font-size:27px;box-shadow:0 8px 25px #7067ff44}.a0-usage-head-copy{flex:1;min-width:0}.a0-usage-eyebrow{font-size:10px;letter-spacing:.17em;font-weight:800;color:#8ddde7}.a0-usage-head h2{font-size:22px;line-height:1.2;margin:3px 0 4px;color:#fff}.a0-usage-head p{font-size:12px;color:#abb9d0;margin:0}.a0-usage-refresh{border:1px solid #ffffff38;background:#ffffff12;border-radius:10px;color:#eaf1ff;padding:9px 12px;cursor:pointer;font-weight:700;white-space:nowrap}.a0-usage-refresh:hover{background:#ffffff22}.a0-usage-refresh:disabled{opacity:.55;cursor:wait}
+.a0-usage-period+.a0-usage-period{margin-top:22px;padding-top:18px;border-top:1px solid #ffffff25}.a0-usage-period-heading{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 11px}.a0-usage-period-heading h3{font-size:15px;color:#eef4ff;margin:0}.a0-usage-period-heading p{font-size:11px;color:#a9bfd1;margin:0;text-align:right}
+.a0-usage-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px}.a0-usage-card{min-width:0;padding:18px;border-radius:17px;background:#ffffff0b;border:1px solid #ffffff20}.a0-usage-card.is-kimi{--usage-accent:#8f80ff}.a0-usage-card.is-browser{--usage-accent:#48c9ad}.a0-usage-card.is-all{--usage-accent:#f0bd73}.a0-usage-card-top{display:flex;align-items:center;gap:10px;min-height:43px}.a0-usage-dot{width:10px;height:10px;flex:none;border-radius:50%;background:var(--usage-accent);box-shadow:0 0 14px var(--usage-accent)}.a0-usage-card h3{font-size:15px;margin:0;color:#fff}.a0-usage-card p{font-size:11px;margin:3px 0 0;color:#9fb2c8}.a0-usage-token-line{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin:15px 0}.a0-usage-token-line>div{border-radius:10px;padding:10px;background:#070e1f66}.a0-usage-token-line small{display:block;color:#99aec3;font-size:9px;letter-spacing:.11em}.a0-usage-token-line strong{display:block;margin-top:4px;font-size:17px;font-variant-numeric:tabular-nums}.a0-usage-total,.a0-usage-cost,.a0-usage-budget-copy{display:flex;justify-content:space-between;gap:8px;align-items:center}.a0-usage-total{color:#b3c2d4;font-size:11px}.a0-usage-total strong{color:#e9f3ff;font-size:12px}.a0-usage-cost{padding:14px 0;margin:12px 0;border-block:1px solid #ffffff1a;color:#b7c6d6;font-size:11px}.a0-usage-cost strong{font-size:19px;color:var(--usage-accent);font-variant-numeric:tabular-nums}.a0-usage-budget-title{font-size:10px;color:#9fb2c8;margin-bottom:8px}.a0-usage-budget{margin:8px 0}.a0-usage-budget-copy{font-size:11px;color:#b5c3d4}.a0-usage-budget-copy b{color:#fff;font-variant-numeric:tabular-nums}.a0-usage-quota-label{display:block;color:#879caf;font-size:9px;margin-top:2px}.a0-usage-track{height:5px;border-radius:9px;background:#ffffff18;margin-top:5px;overflow:hidden}.a0-usage-track span{display:block;height:100%;border-radius:9px;background:var(--usage-accent);transition:width .35s ease}
+.a0-usage-cost strong.is-range{font-size:14px;text-align:right;overflow-wrap:anywhere}
+.a0-usage-foot{margin-top:17px;color:#abbdd0;font-size:11px;line-height:1.55}.a0-usage-foot p{margin:7px 0}.a0-usage-foot strong{color:#e4efff}.a0-usage-foot a{color:#93ddf0}.a0-usage-error{color:#ff9da9;font-size:12px}.a0-usage-assumptions summary{cursor:pointer;color:#c9d8f0;font-weight:700;margin-top:10px}.a0-usage-settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px;margin:12px 0}.a0-usage-settings label{display:flex;flex-direction:column;gap:5px;color:#b8c9db}.a0-usage-settings input{width:100%;box-sizing:border-box;border:1px solid #ffffff36;border-radius:8px;background:#ffffff12;color:#fff;padding:7px}
+@media(max-width:1050px){.a0-usage-grid{grid-template-columns:1fr}.a0-usage-card{display:block}}@media(max-width:600px){.a0-usage-overview{padding:15px}.a0-usage-head{gap:9px;flex-wrap:wrap}.a0-usage-head h2{font-size:19px}.a0-usage-refresh{margin-left:auto}}
+</style>

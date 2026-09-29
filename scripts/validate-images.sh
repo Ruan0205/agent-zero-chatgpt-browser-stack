@@ -25,9 +25,11 @@ wait_exec() {
   done
 }
 
-docker run -d --rm --name "$queue" agent-zero-browser-stack-featherless-queue >/dev/null
-wait_exec "$queue" "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""
-echo "OK featherless-queue"
+if docker image inspect agent-zero-browser-stack-featherless-queue >/dev/null 2>&1; then
+  docker run -d --rm --name "$queue" agent-zero-browser-stack-featherless-queue >/dev/null
+  wait_exec "$queue" "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""
+  echo "OK adaptador Kimi/We64"
+fi
 
 docker run -d --rm --name "$vscode" -e VSCODE_EXEC_TOKEN=validation-token agent-zero-browser-stack-vscode >/dev/null
 wait_exec "$vscode" "curl -fsS http://127.0.0.1:8080/healthz"
@@ -45,8 +47,10 @@ docker run -d --rm --name "$browser" \
 wait_exec "$browser" "curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null && pgrep -f google-chrome-stable >/dev/null"
 echo "OK chatgpt-browser-agent first-login mode"
 
-docker run --rm --entrypoint /bin/sh agent-zero-browser-stack-meta-ai-whatsapp \
-  -lc "test -x /usr/local/bin/wametaai"
-echo "OK meta-ai-whatsapp binary"
+if docker image inspect agent-zero-browser-stack-meta-ai-whatsapp >/dev/null 2>&1; then
+  docker run --rm --entrypoint /bin/sh agent-zero-browser-stack-meta-ai-whatsapp \
+    -lc "test -x /usr/local/bin/wametaai"
+  echo "OK meta-ai-whatsapp binary"
+fi
 
 echo "Todas as imagens locais passaram no smoke test."

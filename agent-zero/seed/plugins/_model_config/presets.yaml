@@ -1,76 +1,54 @@
 - name: Default
-  chat:
-    provider: other
-    name: Blackfrost-AI/Qwen3.8-27B-ABLITERATED-BF16
-    api_base: http://agent-zero-featherless-queue:8000/v1
-    kwargs:
-      chat_template_kwargs:
-        enable_thinking: false
-      temperature: 0.4
-    ctx_length: 32768
-    ctx_history: 0.5
-    vision: true
-    max_embeds: 10
-    rl_requests: 0
-    rl_input: 0
-    rl_output: 0
-  utility:
-    provider: other
-    name: chatgpt-browser-utility
-    api_base: http://chatgpt-browser-utility:8000/v1
-    kwargs:
-      temperature: 0.4
-      timeout: 600
-    ctx_length: 65536
-    ctx_input: 0.85
-    rl_requests: 0
-    rl_input: 0
-    rl_output: 0
-  embedding:
-    provider: huggingface
-    name: sentence-transformers/all-MiniLM-L6-v2
-    api_base: ''
-    rl_requests: 0
-    rl_input: 0
-- name: Efficiency
-  chat:
-    provider: other
-    name: Blackfrost-AI/Qwen3.8-27B-ABLITERATED-BF16
-    api_base: http://agent-zero-featherless-queue:8000/v1
-    kwargs:
-      chat_template_kwargs:
-        enable_thinking: false
-      temperature: 0.4
-    ctx_length: 32768
-    ctx_history: 0.5
-    vision: true
-    max_embeds: 10
-    rl_requests: 0
-    rl_input: 0
-    rl_output: 0
-  utility:
-    provider: other
-    name: chatgpt-browser-utility
-    api_base: http://chatgpt-browser-utility:8000/v1
-    kwargs:
-      temperature: 0.4
-      timeout: 600
-    ctx_length: 65536
-    ctx_input: 0.85
-  embedding:
-    provider: huggingface
-    name: sentence-transformers/all-MiniLM-L6-v2
-    api_base: ''
-- name: Power
-  chat:
+  chat: &browser_chat
     provider: other
     name: chatgpt-browser
     api_base: http://chatgpt-browser-agent:8000/v1
     kwargs:
       temperature: 0.4
       timeout: 1200
-    ctx_length: 65536
+    ctx_length: 131072
     ctx_history: 0.8
+    vision: true
+    max_embeds: 10
+    rl_requests: 0
+    rl_input: 0
+    rl_output: 0
+  utility: &browser_utility
+    provider: other
+    name: chatgpt-browser-utility
+    api_base: http://chatgpt-browser-utility:8000/v1
+    kwargs:
+      temperature: 0.4
+      timeout: 1200
+    ctx_length: 131072
+    ctx_input: 0.85
+    rl_requests: 0
+    rl_input: 0
+    rl_output: 0
+  embedding: &embedding
+    provider: huggingface
+    name: sentence-transformers/all-MiniLM-L6-v2
+    api_base: ''
+    rl_requests: 0
+    rl_input: 0
+- name: Efficiency
+  chat: *browser_chat
+  utility: *browser_utility
+  embedding: *embedding
+- name: Power
+  chat: *browser_chat
+  utility: *browser_utility
+  embedding: *embedding
+- name: Kimi-K3
+  chat:
+    provider: other
+    name: kimi-k3
+    api_base: http://agent-zero-featherless-queue:8000/v1
+    kwargs:
+      temperature: 0.4
+      timeout: 21600
+    ctx_length: 1000000
+    ctx_history: 0.9
     vision: true
     max_embeds: 10
     rl_requests: 0
@@ -78,14 +56,14 @@
     rl_output: 0
   utility:
     provider: other
-    name: chatgpt-browser-utility
-    api_base: http://chatgpt-browser-utility:8000/v1
+    name: kimi-k3
+    api_base: http://agent-zero-featherless-queue:8000/v1
     kwargs:
-      temperature: 0.4
-      timeout: 600
-    ctx_length: 65536
-    ctx_input: 0.85
-  embedding:
-    provider: huggingface
-    name: sentence-transformers/all-MiniLM-L6-v2
-    api_base: ''
+      temperature: 0.3
+      timeout: 21600
+    ctx_length: 1000000
+    ctx_input: 0.9
+    rl_requests: 0
+    rl_input: 0
+    rl_output: 0
+  embedding: *embedding

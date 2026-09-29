@@ -186,6 +186,24 @@ async def run_subordinate(
         raise RepairableException("call_subordinate requires a non-empty `message`.")
 
     attachment_paths = [str(item) for item in attachments or []]
+    # Applies to direct and parallel delegation, not only the tool hook.
+    try:
+        from usr.plugins.visual_evidence_guard.evidence import is_visual_review, prepare_review, inspect_image
+    except ImportError:
+        is_visual_review = None
+    if is_visual_review and is_visual_review(assignment):
+        assignment, attachment_paths = prepare_review(
+            assignment, attachment_paths, parent.context.get_data('last_visual_capture')
+        )
+        subordinate.context.set_data('visual_review_evidence', attachment_paths)
+        subordinate.context.set_data('visual_review_loaded', [])
+        subordinate.context.set_data('visual_review_hashes', {
+            path: inspect_image(path)['sha256'] for path in attachment_paths
+        })
+    else:
+        subordinate.context.set_data('visual_review_evidence', None)
+        subordinate.context.set_data('visual_review_loaded', [])
+        subordinate.context.set_data('visual_review_hashes', {})
     if subordinate.context is not parent.context:
         message_queue.log_user_message(
             subordinate.context,

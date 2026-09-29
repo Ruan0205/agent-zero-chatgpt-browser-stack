@@ -1,61 +1,18 @@
-import base64
-import json
-import shlex
-from pathlib import Path
-
 from helpers.extension import Extension
 
 
 class VscodeTerminalGuard(Extension):
-    """Keep legacy terminal calls inside the VS Code chat workspace.
+    """Normalize editor aliases without changing terminal transport.
 
-    Some models are strongly trained to select code_execution_tool even after
-    opening VS Code. Once this chat has explicitly opened its VS Code workspace,
-    transparently execute terminal commands in the code-server sidecar instead.
+    code_execution_tool/input share a persistent PTY in Agent Zero. Routing the
+    former through VS Code's one-shot HTTP executor discards stdin and shell
+    state and breaks input/output polling. VS Code execution remains explicit
+    through vscode(action=terminal); both environments mount /workspace.
     """
 
     async def execute(self, tool_name: str = "", tool_args: dict | None = None, **_kwargs):
-        if not self.agent or not isinstance(tool_args, dict):
-            return
-        if tool_name == "text_editor":
+        if tool_name == "text_editor" and isinstance(tool_args, dict):
             self._normalize_text_editor_patch(tool_args)
-            return
-        if tool_name != "code_execution_tool":
-            return
-        workspace_exists = (Path("/workspace/chats") / str(self.agent.context.id)).is_dir()
-        if not self.agent.get_data("_vscode_workspace_active") and not workspace_exists:
-            return
-        if str(tool_args.get("runtime") or "").strip().lower() != "terminal":
-            return
-
-        context_id = str(self.agent.context.id)
-        command = str(tool_args.get("code") or "")
-        # Uploaded user files live in Agent Zero's persistent /a0/usr volume,
-        # not in the isolated VS Code sidecar.  Keep attachment inspection in
-        # the Agent Zero container even when this chat already has a workspace;
-        # project commands remain routed to VS Code as before.
-        if "/a0/usr/uploads/" in command or "/a0/usr/browser-media/" in command:
-            return
-        timeout = max(1, min(int(tool_args.get("timeout") or 120), 600))
-        payload = base64.b64encode(json.dumps({
-            "context_id": context_id,
-            "command": command,
-            "timeout": timeout,
-        }).encode("utf-8")).decode("ascii")
-        runner = (
-            "import base64,json,os,sys,urllib.request;"
-            "p=base64.b64decode(sys.argv[1]);"
-            "q=urllib.request.Request('http://agent-zero-vscode:8765/exec',data=p,"
-            "headers={'Authorization':'Bearer '+os.environ['VSCODE_EXEC_TOKEN'],"
-            "'Content-Type':'application/json'},method='POST');"
-            "d=json.loads(urllib.request.urlopen(q,timeout=630).read());"
-            "sys.stdout.write(d.get('stdout',''));sys.stderr.write(d.get('stderr',''));"
-            "sys.exit(int(d.get('exit_code',1)))"
-        )
-        tool_args["code"] = (
-            f"/opt/venv-a0/bin/python -c {shlex.quote(runner)} {shlex.quote(payload)}"
-        )
-        tool_args["reset"] = True
 
     @staticmethod
     def _normalize_text_editor_patch(tool_args: dict) -> None:

@@ -51,7 +51,7 @@ copy_once "$seed_root/settings.json" "$data_root/agent-zero-repair/settings.json
 repair_prompt="$data_root/agent-zero-repair/agents/agent0/prompts/agent.system.main.specifics.md"
 repair_seed="$seed_root/agents/agent0/prompts/agent.system.main.repair.md"
 if [ -f "$repair_prompt" ] && ! cmp -s "$repair_seed" "$repair_prompt"; then
-  repair_backup="$data_root/.stack-backups/${STACK_SCHEMA_VERSION:-v2.12-stack.12}/repair-prompt"
+  repair_backup="$data_root/.stack-backups/${STACK_SCHEMA_VERSION:-v2.12-stack.13}/repair-prompt"
   mkdir -p "$repair_backup"
   cp "$repair_prompt" "$repair_backup/agent.system.main.specifics.md"
 fi
@@ -74,6 +74,12 @@ done
 copy_once "$seed_root/plugins/_model_config/config.json" "$data_root/agent-zero/plugins/_model_config/config.json"
 copy_once "$seed_root/plugins/_model_config/presets.yaml" "$data_root/agent-zero/plugins/_model_config/presets.yaml"
 copy_once "$seed_root/plugins/_code_execution/config.json" "$data_root/agent-zero/plugins/_code_execution/config.json"
+for instance in agent-zero agent-zero-repair; do
+  copy_once "$seed_root/plugins/visual_evidence_guard" "$data_root/$instance/plugins/visual_evidence_guard"
+  copy_once "$seed_root/plugins/kimi_stream_resilience" "$data_root/$instance/plugins/kimi_stream_resilience"
+  copy_once "$seed_root/plugins/message_queue_guard" "$data_root/$instance/plugins/message_queue_guard"
+  copy_once "$seed_root/plugins/memory_delete_guard" "$data_root/$instance/plugins/memory_delete_guard"
+done
 
 if [ ! -e "$data_root/agent-zero/plugins/browser_session_bridge/plugin.yaml" ]; then
   cp -R "$seed_root/plugins/browser_session_bridge/." "$data_root/agent-zero/plugins/browser_session_bridge/"

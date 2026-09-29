@@ -1,0 +1,18 @@
+<div class="chat-token-speed" x-data x-show="$store.chats?.selectedContext?.id"
+     :title="$store.chats?.selectedContext?.chat_token_usage?.last_call ?
+       ('Última chamada do modelo: ' + Number($store.chats.selectedContext.chat_token_usage.last_call.output_tokens || 0).toLocaleString('pt-BR') +
+       ' tokens de saída em ' + Number($store.chats.selectedContext.chat_token_usage.last_call.elapsed_seconds || 0).toLocaleString('pt-BR') +
+       ' s. A média inclui o tempo de espera até a resposta.' +
+       ($store.chats.selectedContext.chat_token_usage.last_call.estimated ? ' Contagem estimada.' : ' Tokens informados pelo provedor.')) :
+       'A velocidade aparece após a próxima chamada concluída do modelo.'"
+     aria-label="Velocidade média da última chamada do modelo">
+  <span class="chat-token-speed-value" x-text="$store.chats?.selectedContext?.chat_token_usage?.last_call ?
+    (($store.chats.selectedContext.chat_token_usage.last_call.estimated ? '≈' : '') +
+     Number($store.chats.selectedContext.chat_token_usage.last_call.tokens_per_second || 0).toLocaleString('pt-BR', {maximumFractionDigits: 1})) : '—'"></span>
+  <span class="chat-token-speed-unit">tok/s</span>
+</div>
+<style>
+  .chat-token-speed{display:inline-flex;align-items:baseline;gap:3px;min-height:1.8rem;padding:0 .55rem;border:1px solid var(--color-border,#414853);border-radius:9px;background:#ffffff09;color:var(--color-text-secondary,#b9c9da);font:700 11px/1 system-ui,sans-serif;white-space:nowrap}
+  .chat-token-speed-value{align-self:center;color:var(--color-text,#f1f5fa);font-variant-numeric:tabular-nums}
+  .chat-token-speed-unit{align-self:center;font-weight:500;opacity:.8}
+</style>

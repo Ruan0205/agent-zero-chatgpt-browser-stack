@@ -1,5 +1,33 @@
 # Changelog
 
+## v2.12-stack.13 — Kimi opcional, fallback browser e robustez acumulada
+
+- Torna Kimi-K3/We64 opcional por profile. Quando habilitado, Kimi atende chat,
+  Utility/compactação e reparador com contexto configurado em 1M; sem chave externa,
+  ChatGPT Browser assume integralmente esses três papéis.
+- Torna WhatsApp/Meta AI opcional por profile e remove serviços opcionais da cadeia
+  rígida de dependências do Agent Zero.
+- Adiciona configurador de integrações que preserva credenciais e seleciona de forma
+  atômica os modelos, endpoints, contextos e VNCs necessárias.
+- Endurece Kimi contra streams incompletos, respostas vazias e InvalidDSML: parser
+  seguro para DSML/JSON, alias estreito `tasks.list_tasks`, correção efêmera e
+  retentativa somente do LLM, sem replay de ferramentas já executadas.
+- Acrescenta fila transacional SQLite com persistência de anexos, reordenação, edição,
+  retomada manual de execução incerta e recuperação após restart.
+- Adiciona evidência visual verificada, imagens Kimi em alta resolução e rejeição de
+  capturas pretas/uniformes antes da avaliação por subagente.
+- Protege exclusão ampla de memórias com dry-run, confirmação por ID e checkpoint.
+- Atualiza reparador e controller para respostas longas, autorização em linguagem
+  natural, melhoria global, prova de alteração nova e retomada separadamente aprovada.
+- Consolida painel de tokens mensal/histórico e por modelo, entrada/saída, estimativas,
+  tokens por segundo e compactação manual; corrige preset efetivo e seleção exclusiva.
+- Inclui as correções acumuladas de artefatos, mídia, sessões de terminal/subagentes,
+  diretórios por chat, aliases e documentação fixa de ferramentas.
+- Monta as fontes dos quatro plugins recentes diretamente da release, evitando que
+  uma cópia antiga no volume persistente sobreviva a uma atualização.
+- Reescreve requisitos, instalação, atualização e prompts de outra IA para preservar
+  customizações, dados e chaves, testar ambos os modos e realizar rollback verificável.
+
 ## v2.12-stack.12 — compatibilidade com a interface atual e operação visível
 
 - Reconhece a estrutura atual dos turnos e do editor do ChatGPT, incluindo upload e botão de envio; não declara uma resposta concluída apenas porque um indicador de atividade sumiu momentaneamente.

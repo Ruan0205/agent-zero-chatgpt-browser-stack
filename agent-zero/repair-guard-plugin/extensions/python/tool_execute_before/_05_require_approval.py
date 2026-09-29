@@ -14,7 +14,7 @@ class RequireRepairApproval(Extension):
     """
 
     async def execute(self, tool_name: str = "", **kwargs) -> None:
-        if tool_name in {"response", "document_query"}:
+        if tool_name in {"response", "document_query", "skills_tool"}:
             return
         context_id = str(getattr(getattr(self.agent, "context", None), "id", ""))
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", context_id):

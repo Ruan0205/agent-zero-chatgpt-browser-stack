@@ -719,7 +719,12 @@ def get_effective_preset_name(agent=None) -> str:
         context = getattr(agent, "context", None)
         locked = context.get_data("browser_model_lock") if context else None
         if isinstance(locked, dict) and locked.get("preset_name"):
-            return str(locked["preset_name"])
+            name = str(locked["preset_name"])
+            preset = resolve_preset(name)
+            locked_model = str(locked.get("model_name") or "").split("/")[-1]
+            if preset and str((preset.get("chat") or {}).get("name") or "") == locked_model:
+                return name
+            return "Custom"
         override = getattr(agent, "context", None)
         override = override.get_data("chat_model_override") if override else None
         if isinstance(override, dict):
@@ -727,6 +732,12 @@ def get_effective_preset_name(agent=None) -> str:
             preset = resolve_preset(name) if name else None
             if preset:
                 return str(preset.get("name") or DEFAULT_PRESET_NAME)
+            override_model = str((override.get("chat") or {}).get("name") or "")
+            if override_model:
+                configured = get_config(agent)
+                configured_model = str((configured.get("chat_model") or {}).get("name") or "")
+                if override_model != configured_model:
+                    return "Custom"
     config = get_config(agent)
     return str(config.get(MODEL_PRESET_CONFIG_KEY) or DEFAULT_PRESET_NAME)
 
@@ -758,7 +769,7 @@ def get_effective_config(agent=None) -> dict:
     if agent and getattr(agent, "context", None):
         locked = agent.context.get_data("browser_model_lock")
         if isinstance(locked, dict) and locked.get("preset_name"):
-            config[MODEL_PRESET_CONFIG_KEY] = str(locked["preset_name"])
+            config[MODEL_PRESET_CONFIG_KEY] = get_effective_preset_name(agent)
             config["allow_chat_override"] = False
     return config
 

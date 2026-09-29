@@ -23,11 +23,20 @@ CONTROLLER_TOKEN = os.environ.get("REPAIR_AGENT_API_TOKEN", "")
 BRIDGE_TOKEN = os.environ.get("BROWSER_POOL_NOTICE_TOKEN") or os.environ.get("AGENT_ZERO_NOTICE_TOKEN", "")
 
 
+def _profile_enabled(name: str) -> bool:
+    return name in {part.strip() for part in os.environ.get("COMPOSE_PROFILES", "").split(",")}
+
+
 def _hard_reload_browsers():
     if not BRIDGE_TOKEN:
         raise RuntimeError("Token da ponte não configurado")
     results = []
-    for name in ("chatgpt-browser-agent", "chatgpt-browser-utility", "chatgpt-browser-repair"):
+    bridges = ["chatgpt-browser-agent"]
+    if _profile_enabled("browser-utility"):
+        bridges.append("chatgpt-browser-utility")
+    if _profile_enabled("browser-repair"):
+        bridges.append("chatgpt-browser-repair")
+    for name in bridges:
         request = urllib.request.Request(
             f"http://{name}:8000/v1/admin/hard-reload", data=b"{}", method="POST",
             headers={"Content-Type": "application/json", "X-Browser-Pool-Token": BRIDGE_TOKEN},
@@ -43,11 +52,13 @@ def _hard_reload_browsers():
 
 def _vnc_slots():
     """Live, read-only status; never infer availability from a static port."""
-    services = (
+    services = [
         ("http://chatgpt-browser-agent:8000/health", (("Principal 1", int(os.environ.get("CHATGPT_VNC_PORT", "50081"))), ("Principal 2", int(os.environ.get("CHATGPT_VNC_2_PORT", "50083"))), ("Principal 3", int(os.environ.get("CHATGPT_VNC_3_PORT", "50085"))))),
-        ("http://chatgpt-browser-utility:8000/health", (("Utility", int(os.environ.get("CHATGPT_UTILITY_VNC_PORT", "50084"))),)),
-        ("http://chatgpt-browser-repair:8000/health", (("Reparador", int(os.environ.get("CHATGPT_REPAIR_VNC_PORT", "50087"))), ("Utility reparador", int(os.environ.get("CHATGPT_REPAIR_UTILITY_VNC_PORT", "50088"))))),
-    )
+    ]
+    if _profile_enabled("browser-utility"):
+        services.append(("http://chatgpt-browser-utility:8000/health", (("Utility", int(os.environ.get("CHATGPT_UTILITY_VNC_PORT", "50084"))),)))
+    if _profile_enabled("browser-repair"):
+        services.append(("http://chatgpt-browser-repair:8000/health", (("Reparador", int(os.environ.get("CHATGPT_REPAIR_VNC_PORT", "50087"))), ("Utility reparador", int(os.environ.get("CHATGPT_REPAIR_UTILITY_VNC_PORT", "50088"))))))
     slots = []
     for url, displays in services:
         try:
@@ -109,6 +120,7 @@ def _snapshot():
         "unread_completed_chats": completion_state.unread(),
         "repair_vnc_port": int(os.environ.get("REPAIR_VNC_PORT", "50087")),
         "vnc_slots": _vnc_slots(),
+        "repair_has_vnc": os.environ.get("REPAIR_REQUIRES_BROWSER", "true").lower() == "true",
         "counts": {
             "total": len(incidents) + len(repairs),
             "open": sum(1 for item in incidents if not item.get("resolved")) + len(repairs),

@@ -1,0 +1,5 @@
+name: message_queue_guard
+title: Reliable message queue
+description: Durable transactional queue with explicit completion, ordering and recoverable editing.
+version: 2.0.0
+always_enabled: true

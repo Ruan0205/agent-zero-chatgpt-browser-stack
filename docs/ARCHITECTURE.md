@@ -2,13 +2,21 @@
 
 ## Objetivo
 
-Esta distribuição transforma o Agent Zero em um orquestrador local com três caminhos de inferência e um conjunto de ferramentas persistentes. O Compose usa uma única rede bridge `ai-shared`; somente as interfaces destinadas ao operador são publicadas no host.
+Esta distribuição transforma o Agent Zero em um orquestrador local com um caminho
+ChatGPT Browser sempre disponível e integrações opcionais. O Compose usa uma única
+rede bridge `ai-shared`; somente as interfaces destinadas ao operador são publicadas.
 
 ## Fluxos de inferência
 
-### Featherless
+### Kimi-K3/We64 (opcional)
 
-O Agent Zero chama `http://agent-zero-featherless-queue:8000/v1`. O proxy FastAPI preserva `Authorization`, serializa todo o tráfego com `asyncio.Semaphore(1)` e mantém o slot durante o streaming. Erros 408, 409, 425, 429, 5xx e estados temporários de deployment usam backoff limitado. Assim, duas partes do Agent Zero não concorrem simultaneamente pela mesma cota upstream.
+Quando o profile `kimi` é habilitado, o Agent Zero chama
+`http://agent-zero-featherless-queue:8000/v1`. O nome histórico do serviço é mantido
+para compatibilidade, mas o upstream é `KIMI_UPSTREAM_URL` e o modelo é `kimi-k3`.
+O proxy preserva `Authorization`, serializa todo o tráfego e mantém o slot durante
+a resposta. Erros transitórios usam backoff limitado. Chat, Utility/compactação e
+reparador usam o mesmo Kimi com contexto configurado em 1M. Sem esse profile,
+nenhuma chave ou conta We64 é necessária.
 
 ### ChatGPT Browser
 
@@ -41,13 +49,15 @@ perfil Chrome separados; uma segunda VNC (porta 50088 por padrão) fica
 reservada à Utility do reparador. A análise começa em modo somente leitura;
 reparo e retomada do chat original exigem aprovações independentes.
 
-### ChatGPT Browser Utility
+### ChatGPT Browser Utility (modo sem Kimi)
 
-Um segundo serviço usa a mesma imagem, mas possui apenas uma instância Chrome,
+No modo `browser`, um segundo serviço usa a mesma imagem, mas possui uma instância Chrome,
 um volume independente (`data/browser-utility`) e sua própria tela noVNC na porta
 50084. No primeiro start, copia o perfil autenticado do browser principal; os
 dois serviços nunca escrevem simultaneamente no mesmo perfil. O modelo Utility
-dos três presets aponta para `http://chatgpt-browser-utility:8000/v1`.
+aponta para `http://chatgpt-browser-utility:8000/v1`. O reparador também ganha um
+navegador dedicado no profile `browser-repair`. No modo Kimi, esses dois profiles
+são desligados e a compactação e o reparador usam a API We64.
 
 As chamadas auxiliares compartilham uma única conversa web ativa, serializada
 pelo pool. O bridge envia a tarefa completa a cada chamada e instrui o GPT a
@@ -59,7 +69,9 @@ do serviço ChatGPT nem transforma um resumo em cópia integral do histórico.
 
 ### Presets
 
-`agent-zero/seed/plugins/_model_config/presets.yaml` define Default, Efficiency e Power.
+`agent-zero/seed/plugins/_model_config/presets.yaml` define Default, Efficiency,
+Power e Kimi-K3. A configuração efetiva do Compose vem das variáveis `DEFAULT_*`,
+`UTILITY_*` e `REPAIR_*`, definidas por `scripts/configure-integrations.sh`.
 O seed só é copiado quando o arquivo persistente não existe. Depois disso, a interface
 do Agent Zero é a fonte de verdade, exceto por migrações versionadas e estreitas de
 compatibilidade (como retirar o antigo Utility Gemma).
@@ -82,14 +94,16 @@ O Agent Zero recebe:
 
 O método previsto para comandos no host é `nsenter` usando namespaces em `/host/proc/1/ns`. O acesso técnico é integral; a regra de autorização é comportamental, não uma barreira de kernel.
 
-### WhatsApp e Meta AI
+### WhatsApp e Meta AI (opcionais)
 
 Há dois estados separados:
 
-1. O plugin de WhatsApp do Agent Zero usa `data/whatsapp` e permite self-chat, anexos e respostas do agente.
-2. `meta-ai-whatsapp` usa `data/meta-ai-whatsapp`, pareia com um número próprio e expõe endpoints OpenAI-compatible somente na rede Docker. O plugin `_meta_ai_image` chama esse serviço para geração e edição de imagens. O pareamento é opcional e aparece em **Settings > External > Meta AI WhatsApp Bridge**, ao lado da configuração do WhatsApp; abrir a tela não conecta conta alguma.
+1. O plugin de WhatsApp do Agent Zero usa `data/whatsapp` quando o operador decide pareá-lo.
+2. O serviço `meta-ai-whatsapp` só existe com o profile `whatsapp`; usa
+   `data/meta-ai-whatsapp` e expõe endpoints apenas na rede Docker.
 
-O modelo `chatgpt-browser` usa a criação/edição nativa do ChatGPT e não roteia imagens pela Meta AI. Modelos Featherless só usam a bridge Meta AI quando ela está pareada e a ferramenta é selecionada.
+O modelo `chatgpt-browser` usa a criação/edição nativa do ChatGPT. Kimi só chama a
+bridge Meta AI se ela estiver habilitada, pareada e a ferramenta for escolhida.
 
 Nenhuma sessão é incluída no Git.
 
@@ -119,7 +133,11 @@ O painel noVNC busca esse JSON por uma rota do Agent Zero protegida pelo login e
 
 ## Inicialização e recuperação
 
-Todos os serviços duradouros usam `restart: unless-stopped`. O Agent Zero espera bootstrap, queue, VS Code e ChatGPT Browser estarem prontos. Após reinício do host, o Docker restaura a stack se o daemon estiver habilitado (`systemctl enable --now docker`).
+Todos os serviços duradouros usam `restart: unless-stopped`. O Agent Zero espera
+bootstrap, VS Code e o browser principal. Serviços opcionais não são dependências
+rígidas; os profiles selecionados determinam queue Kimi, Utility browser, browser do
+reparador e WhatsApp. Após reinício do host, o Docker restaura a stack se o daemon
+estiver habilitado (`systemctl enable --now docker`).
 
 A imagem customizada do Agent Zero v2.12 mescla os arquivos oficiais ausentes de `/git/agent-zero` em `/a0` durante o build. Isso evita o boot-loop observado em recriações limpas quando o runtime já contém `run_ui.py`, mas ainda não contém plugins oficiais que o core importa.
 

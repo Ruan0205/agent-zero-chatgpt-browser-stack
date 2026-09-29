@@ -180,7 +180,10 @@ function render(root, state) {
   const activeRepairId = root.dataset.activeRepairId && state.repair_sessions?.[root.dataset.activeRepairId]
     ? root.dataset.activeRepairId : selectedId;
   const repair = state.repair_sessions?.[activeRepairId];
-  for (const link of root.querySelectorAll(".repair-vnc")) link.dataset.port = String(state.repair_vnc_port || 50087);
+  for (const link of root.querySelectorAll(".repair-vnc")) {
+    link.dataset.port = String(state.repair_vnc_port || 50087);
+    link.hidden = state.repair_has_vnc === false;
+  }
   const repairPanel = root.querySelector(".repair-panel");
   if (repairPanel) repairPanel.hidden = !repair;
   if (repair) {

@@ -31,7 +31,7 @@ if [ ! -f .env ]; then
     -e "s/Vnc12345$/$vnc_password/" \
     .env
   chmod 0600 .env
-  echo ".env criado com senhas aleatórias. Edite API_KEY_OTHER, WA_PHONE e PUBLIC_HOST antes de subir."
+  echo ".env criado com senhas aleatórias. Revise PUBLIC_HOST e escolha o modo com scripts/configure-integrations.sh."
 else
   if ! grep -q '^REPAIR_AGENT_API_TOKEN=' .env; then
     printf '\nREPAIR_AGENT_API_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env

@@ -1,0 +1,5 @@
+name: visual_evidence_guard
+title: Verified visual evidence
+description: Validates browser captures and binds visual reviewers to explicit evidence files.
+version: 1.0.0
+always_enabled: true

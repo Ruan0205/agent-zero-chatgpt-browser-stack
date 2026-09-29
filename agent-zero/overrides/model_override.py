@@ -51,14 +51,23 @@ class ModelOverride(ApiHandler):
         if action == "get":
             override = ctx.get_data("chat_model_override")
             locked = ctx.get_data("browser_model_lock")
-            if isinstance(locked, dict) and locked.get("preset_name"):
-                override = {"preset_name": locked["preset_name"]}
+            actual_model = str(model_config.get_chat_model_config(ctx.agent0).get("name") or "")
+            locked_preset = str(locked.get("preset_name") or "") if isinstance(locked, dict) else ""
+            preset = model_config.get_preset_by_name(locked_preset) if locked_preset else None
+            preset_model = str((preset or {}).get("chat", {}).get("name") or "")
+            preset_matches = bool(preset_model and preset_model == actual_model)
+            if preset_matches:
+                override = {"preset_name": locked_preset}
             allowed = model_config.is_chat_override_allowed(ctx.agent0) and not browser_model_is_locked(ctx)
             return {
                 "override": override,
                 "allowed": allowed,
                 "configured_preset": model_config.get_configured_preset_name(agent=ctx.agent0),
-                "effective_preset": model_config.get_effective_preset_name(ctx.agent0),
+                "effective_preset": locked_preset if preset_matches else (
+                    "Custom" if locked_preset else model_config.get_effective_preset_name(ctx.agent0)
+                ),
+                "actual_chat_model": actual_model,
+                "preset_model_mismatch": bool(locked_preset and not preset_matches),
             }
 
         elif action == "set":

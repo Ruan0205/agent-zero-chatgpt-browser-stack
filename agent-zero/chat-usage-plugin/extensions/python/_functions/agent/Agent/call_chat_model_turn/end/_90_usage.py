@@ -2,6 +2,7 @@
 
 from helpers.extension import Extension
 from plugins._chat_usage.usage import record
+from time import perf_counter
 
 
 class RecordChatUsage(Extension):
@@ -16,4 +17,7 @@ class RecordChatUsage(Extension):
         messages = arguments.get("messages", positional[1] if len(positional) > 1 else [])
         model = self.agent.get_chat_model()
         model_name = str(getattr(model, "model_name", ""))
-        record(self.agent.context, result, messages, model_name)
+        started = getattr(self.agent, "_chat_usage_call_started_at", None)
+        elapsed = perf_counter() - started if isinstance(started, (int, float)) else None
+        self.agent._chat_usage_call_started_at = None
+        record(self.agent.context, result, messages, model_name, elapsed_seconds=elapsed)

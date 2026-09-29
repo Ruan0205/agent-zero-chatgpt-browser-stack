@@ -1,0 +1,5 @@
+name: memory_delete_guard
+title: Safe memory removal
+description: Exact-match deletion, explicit selection for broad forget, private checkpoints before deletion.
+version: 1.0.0
+always_enabled: true

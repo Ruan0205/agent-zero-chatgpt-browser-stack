@@ -18,6 +18,11 @@ rules:
   state remains uncertain, report uncertainty and pause instead of looping.
 - poll only if the previous tool result explicitly says the process is still running; a returned shell prompt means the command has ended, even if the final output contains no separate completion banner
 - use `input` for interactive terminal prompts
+- this persistent terminal runs in the Agent Zero Linux container, starting in
+  `/workspace/chats/<current-chat-id>`. It is not Windows or the VS Code sidecar.
+  The workspace is shared, but installed executables/dependencies may differ.
+  `vscode(action=terminal)` is a separate non-interactive, one-shot executor;
+  never send `input` to a command executed there.
 - if a session seems stuck, first inspect its exact process tree and progress;
   reset only the confirmed disposable session, never a service or unrelated job
 - check dependencies before running code

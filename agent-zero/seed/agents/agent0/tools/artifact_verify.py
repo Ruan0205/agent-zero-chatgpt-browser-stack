@@ -15,6 +15,17 @@ from helpers.tool import Response, Tool
 CHAT_ID = re.compile(r"^[A-Za-z0-9_-]{1,96}$")
 
 
+def _artifact_context(agent):
+    """A real direct-tool parallel job retains its parent's artifact scope."""
+    from helpers.parallel_tools import get_parallel_worker_job
+    job = get_parallel_worker_job(agent)
+    parent = getattr(getattr(job, 'parent_agent', None), 'context', None)
+    if (job and parent and getattr(job, 'worker_context_id', None) == agent.context.id
+            and parent.id == getattr(job, 'parent_context_id', None)):
+        return parent
+    return agent.context
+
+
 def _inspect_file(path: Path, deep: bool) -> dict:
     size = path.stat().st_size
     report = {"exists": True, "size_bytes": size, "format": path.suffix.lower(), "openable": False}
@@ -73,7 +84,8 @@ def _inspect_file(path: Path, deep: bool) -> dict:
 
 class ArtifactVerify(Tool):
     async def execute(self, path: str = "", deep: bool = False, require_published: bool = False, **_kwargs) -> Response:
-        context_id = str(self.agent.context.id)
+        context = _artifact_context(self.agent)
+        context_id = str(context.id)
         if not CHAT_ID.fullmatch(context_id):
             return Response(message="Invalid chat ID.", break_loop=False)
         allowed = [
@@ -90,8 +102,9 @@ class ArtifactVerify(Tool):
             return Response(message="Artifact must be a file under the current chat, uploads, or workdir.", break_loop=False)
         report = await asyncio.to_thread(_inspect_file, target, bool(deep))
         report["path"] = str(target)
+        report["context_id"] = context_id
         published = False
-        for item in self.agent.context.log.logs:
+        for item in context.log.logs:
             if item.type == "user":
                 continue
             values = item.kvps or {}

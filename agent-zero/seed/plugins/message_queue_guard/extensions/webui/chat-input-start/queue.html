@@ -1,0 +1,44 @@
+<div x-data x-init="$store.durableQueue.start()">
+  <script type="module">
+    import {store} from '/plugins/message_queue_guard/webui/queue-store.js';
+    store.start();
+  </script>
+  <section class="durable-queue" x-show="$store.durableQueue.items.length || $store.durableQueue.active">
+    <div class="dq-heading"><span>Lista de espera · <span x-text="$store.durableQueue.items.length"></span></span><small>Salva no servidor</small></div>
+    <div class="dq-active" x-show="$store.durableQueue.active">
+      <span x-text="$store.durableQueue.active?.state==='blocked'?'Execução interrompida — mensagem preservada.':'Mensagem em execução — aguardando resposta final.'"></span>
+      <button x-show="$store.durableQueue.active?.state==='blocked'" @click="$store.durableQueue.resume()">Retomar execução</button>
+    </div>
+    <div class="dq-items">
+      <template x-for="(item,index) in $store.durableQueue.items" :key="item.id">
+        <div class="dq-item">
+          <span class="dq-order" x-text="index+1"></span>
+          <div class="dq-preview"><span x-text="item.text || '(somente anexos)'"></span><small x-show="item.attachment_count" x-text="item.attachment_count+' anexo(s)'"></small></div>
+          <div class="dq-actions">
+            <button :disabled="index===0 || $store.durableQueue._busy" @click="$store.durableQueue.move(item.id,-1)" title="Mover para cima" aria-label="Mover para cima"><x-icon name="arrow_upward"></x-icon></button>
+            <button :disabled="index===$store.durableQueue.items.length-1 || $store.durableQueue._busy" @click="$store.durableQueue.move(item.id,1)" title="Mover para baixo" aria-label="Mover para baixo"><x-icon name="arrow_downward"></x-icon></button>
+            <button :disabled="$store.durableQueue._busy" @click="$store.durableQueue.edit(item.id)" title="Editar texto e anexos" aria-label="Editar mensagem"><x-icon name="edit"></x-icon></button>
+            <button :disabled="$store.durableQueue._busy || !!$store.durableQueue.active" @click="$store.durableQueue.send(item.id)" title="Enviar quando o chat estiver livre" aria-label="Enviar mensagem"><x-icon name="send"></x-icon></button>
+            <button :disabled="$store.durableQueue._busy" @click="$store.durableQueue.remove(item.id)" title="Remover da fila" aria-label="Remover mensagem"><x-icon name="close"></x-icon></button>
+          </div>
+        </div>
+      </template>
+    </div>
+  </section>
+  <style>
+    .queue-preview{display:none!important}
+    x-extension[id="chat-input-start"]{display:contents}
+    .durable-queue{margin:0 0 8px;border:1px solid var(--color-border);border-radius:12px;background:color-mix(in srgb,var(--color-primary) 5%,var(--color-background));padding:10px 12px;width:100%;box-sizing:border-box}
+    .dq-heading{display:flex;justify-content:space-between;font-size:12px;font-weight:600;gap:12px;margin-bottom:6px}
+    .dq-heading small,.dq-preview small{color:var(--color-text-secondary);font-weight:400}
+    .dq-items{max-height:180px;overflow:auto}
+    .dq-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--color-border)}
+    .dq-order{min-width:20px;font-size:12px;color:var(--color-primary)}
+    .dq-preview{min-width:0;flex:1;display:flex;flex-direction:column;font-size:12px}
+    .dq-preview>span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+    .dq-actions{display:flex;gap:2px}.dq-actions button,.dq-active button{border:0;background:transparent;color:var(--color-primary);padding:5px;cursor:pointer;border-radius:5px;display:flex;align-items:center}
+    .dq-actions button:hover{background:var(--color-background-hover)}.dq-actions button:disabled{opacity:.3;cursor:default}
+    .dq-active{font-size:12px;color:var(--color-text-secondary);display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px}
+    .dq-actions x-icon{font-size:17px}@media(max-width:500px){.dq-actions{gap:0}.dq-actions button{padding:3px}.dq-heading small{display:none}}
+  </style>
+</div>

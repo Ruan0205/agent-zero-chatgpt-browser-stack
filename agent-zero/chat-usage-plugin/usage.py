@@ -6,7 +6,9 @@ Keep it explicitly estimated even when the bridge supplies token numbers.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from helpers.tokens import approximate_prompt_tokens
 
@@ -65,9 +67,56 @@ def accumulate(current: Any, delta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def record(context: Any, result: Any, messages: Any, model_name: str) -> None:
+def model_bucket(model_name: str) -> str:
+    name = str(model_name or "").casefold()
+    if "chatgpt-browser" in name:
+        return "browser"
+    if "kimi-k3" in name:
+        return "kimi"
+    return "other"
+
+
+def usage_month(now: datetime | None = None) -> str:
+    moment = now or datetime.now(ZoneInfo("America/Sao_Paulo"))
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(ZoneInfo("America/Sao_Paulo"))
+    return moment.strftime("%Y-%m")
+
+
+def record(context: Any, result: Any, messages: Any, model_name: str,
+           now: datetime | None = None, elapsed_seconds: float | None = None) -> None:
     delta = usage_delta(result, messages, model_name)
+    previous = context.get_output_data("chat_token_usage")
+    previous = previous if isinstance(previous, dict) else {}
+    by_model = previous.get("by_model")
+    by_model = dict(by_model) if isinstance(by_model, dict) else {}
+    bucket = model_bucket(model_name)
+    by_model[bucket] = accumulate(by_model.get(bucket), delta)
+    total = accumulate(previous, delta)
+    total["by_model"] = by_model
+    monthly = previous.get("by_month")
+    monthly = dict(monthly) if isinstance(monthly, dict) else {}
+    month = usage_month(now)
+    month_previous = monthly.get(month)
+    month_previous = month_previous if isinstance(month_previous, dict) else {}
+    month_by_model = month_previous.get("by_model")
+    month_by_model = dict(month_by_model) if isinstance(month_by_model, dict) else {}
+    month_by_model[bucket] = accumulate(month_by_model.get(bucket), delta)
+    month_total = accumulate(month_previous, delta)
+    month_total["by_model"] = month_by_model
+    monthly[month] = month_total
+    total["by_month"] = monthly
+    if elapsed_seconds is not None and elapsed_seconds > 0:
+        total["last_call"] = {
+            "output_tokens": delta["output"],
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "tokens_per_second": round(delta["output"] / elapsed_seconds, 1),
+            "estimated": bool(delta["estimated"]),
+            "model": bucket,
+        }
+    elif isinstance(previous.get("last_call"), dict):
+        total["last_call"] = previous["last_call"]
     context.set_output_data(
         "chat_token_usage",
-        accumulate(context.get_output_data("chat_token_usage"), delta),
+        total,
     )
