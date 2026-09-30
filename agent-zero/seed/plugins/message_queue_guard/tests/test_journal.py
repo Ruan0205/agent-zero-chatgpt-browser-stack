@@ -22,6 +22,12 @@ class JournalTests(unittest.TestCase):
     def test_commit_survives_new_instance(self):
         self.put(attachments=['/a0/usr/uploads/image.png'])
         self.assertEqual(Journal(self.path).rows('a')[0]['attachments'],['/a0/usr/uploads/image.png'])
+    def test_purge_context_removes_all_states_and_migration_marker(self):
+        self.put('pending');self.put('active');self.db.reserve('a',7,'active')
+        self.db.purge_context('a')
+        self.assertEqual(self.db.rows('a'),[]);self.assertIsNone(self.db.active('a'))
+        self.db.migrate('a',[{'id':'fresh','text':'new','attachments':[]}])
+        self.assertEqual(self.db.rows('a'),[])
     def test_hard_process_exit_after_commit(self):
         script="import importlib.util,os; s=importlib.util.spec_from_file_location('j',%r); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); j=m.Journal(%r); j.enqueue('a',{'id':'killed','text':'survive','attachments':[]}); os._exit(17)"%(str(Path(__file__).parents[1]/'journal.py'),str(self.path))
         result=subprocess.run([sys.executable,'-c',script],capture_output=True)

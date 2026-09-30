@@ -53,7 +53,7 @@ if profile_enabled browser-utility; then
 fi
 
 echo "== Migração persistente =="
-marker="${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.14}.json"
+marker="${STACK_DATA_DIR:-./data}/.stack-migrations/${STACK_SCHEMA_VERSION:-v2.12-stack.15}.json"
 test -r "$marker" || { echo "ERRO migration marker ausente: $marker" >&2; exit 1; }
 cat "$marker"
 

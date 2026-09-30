@@ -4,12 +4,13 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 const source=readFileSync(new URL('../webui/queue-store.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace('export {store};','');
 function setup(){
-  const state={selected:'a',requests:[],toasts:[],result:{items:[],active:null},focus:0,polls:0};
+  const state={selected:'a',requests:[],toasts:[],result:{items:[],active:null},focus:0,polls:0,rendered:[]};
   const inputStore={message:'',focus(){state.focus++},adjustTextareaHeight(){}};
   const attachmentsStore={attachments:[],isImageFile:n=>n.endsWith('.png'),getFilePreviewUrl:n=>'/file/'+n,
     getAttachmentDisplayInfo:n=>({filename:n}),addAttachment(a){this.attachments.push(a)},
     getAttachmentsForSending(){return this.attachments.map(a=>a.type==='image'?{...a,url:box.URL.createObjectURL(a.file)}:{...a})}};
   const box={createStore:(_n,m)=>m,inputStore,attachmentsStore,chatsStore:{getSelectedChatId:()=>state.selected},
+    setMessages:async logs=>state.rendered.push(...logs),
     callJsonApi:async (_endpoint,payload)=>{state.requests.push(payload);return typeof state.result==='function'?state.result(payload):state.result},
     setTimeout,clearTimeout,setInterval:()=>1,document:{addEventListener(){}},console,
     URL:{createObjectURL:file=>{if(!file)throw new Error('missing file');return 'blob:test'}},
@@ -81,8 +82,13 @@ test('no simultaneous polling while mutating queue',async()=>{
   const x=setup();x.store._busy=true;await x.store.refresh();assert.equal(x.state.requests.length,0);
 });
 test('active execution reconciles chat history even while websocket looks healthy',async()=>{
-  const x=setup();x.state.result={items:[],active:{id:'one',state:'inflight'},running:true};
+  const x=setup();x.state.result={items:[],active:{id:'one',state:'inflight'},running:true,logs:[{id:'thinking',type:'agent'}]};
   await x.store.refresh();assert.equal(x.state.polls,1);assert.equal(x.store.running,true);
+  assert.equal(x.state.rendered[0].id,'thinking');
+});
+test('intervention remains enabled when transient running projection lags',()=>{
+  const x=setup();x.store.active={id:'one',state:'inflight'};x.store.running=false;
+  assert.equal(x.store.canIntervene(),true);
 });
 test('queued item can be explicitly directed into the active turn',async()=>{
   const x=setup();x.store.active={id:'one',state:'inflight'};x.store.running=true;

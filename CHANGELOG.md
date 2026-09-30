@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.12-stack.15 — interface autoritativa e regressões verificadas
+
+- Torna a reconciliação do histórico independente do cursor do WebSocket: a API
+  devolve uma cauda autoritativa limitada e a interface a reaplica durante a
+  execução, recuperando eventos perdidos sem F5.
+- Mantém **Intervir agora** habilitado a partir da reserva durável `inflight`, sem
+  depender do estado visual transitório `running`.
+- Remove journal e estado ativo ao apagar um chat e grava um tombstone persistente,
+  impedindo que um worker atrasado recrie a fila eliminada.
+- Institui uma lista cumulativa de regressões e um teste ponta a ponta em navegador
+  real como requisito de entrega, cobrindo atualização sem reload, intervenção,
+  preservação da fila e limpeza do chat sintético.
+
 ## v2.12-stack.14 — histórico autorreconciliado e intervenção pela fila
 
 - Reconcilia o histórico por HTTP durante uma execução ativa, inclusive quando o

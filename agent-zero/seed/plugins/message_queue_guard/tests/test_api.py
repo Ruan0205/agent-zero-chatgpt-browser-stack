@@ -25,6 +25,14 @@ class QueueApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_snapshot_is_not_the_full_message(self):
         durable.add(self.ctx,'x'*1000,[], 'one');result=await self.call()
         self.assertEqual(len(result['items'][0]['text']),100)
+        self.assertEqual(result['logs'],[])
+    async def test_snapshot_returns_authoritative_recent_log_tail(self):
+        items=[SimpleNamespace(output=lambda n=n:{'no':n,'id':f'log-{n}'}) for n in range(170)]
+        self.ctx.log.logs=items
+        result=await self.call()
+        self.assertEqual(len(result['logs']),160)
+        self.assertEqual(result['logs'][0]['id'],'log-10')
+        self.assertEqual(result['logs'][-1]['id'],'log-169')
     async def test_edit_returns_complete_text_and_attachment_paths(self):
         durable.add(self.ctx,'x'*1000,['/a0/usr/uploads/file.png'],'one')
         result=await self.call('edit',item_id='one');self.assertEqual(len(result['draft']['text']),1000)

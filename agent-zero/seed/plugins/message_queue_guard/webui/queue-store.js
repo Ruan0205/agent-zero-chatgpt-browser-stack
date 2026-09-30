@@ -3,6 +3,7 @@ import { callJsonApi } from '/js/api.js';
 import { store as inputStore } from '/components/chat/input/input-store.js';
 import { store as attachmentsStore } from '/components/chat/attachments/attachmentsStore.js';
 import { store as chatsStore } from '/components/sidebar/chats/chats-store.js';
+import { setMessages } from '/js/messages.js';
 
 const endpoint='/plugins/message_queue_guard/queue';
 const model={
@@ -12,7 +13,7 @@ const model={
   start() {
     if(this._timer) return;
     this.supportSavedAttachments();
-    this._timer=setInterval(()=>this.refresh(),3000);
+    this._timer=setInterval(()=>this.refresh(),1500);
     document.addEventListener('input',event=>{
       if(event.target?.closest?.('#chat-input') && this.editingId) this.saveDraftSoon();
     });
@@ -61,6 +62,7 @@ const model={
       const result=await this.request('snapshot',{},context);
       if(epoch!==this._submissionEpoch) return;
       this.apply(result,context);
+      if(this.selected()===context && Array.isArray(result.logs) && result.logs.length) await setMessages(result.logs);
       if(result.running || result.active) void this.reconcile(context);
       if(changed && this.selected()===context){
         this.editingId=null;this.editingContext=null;
@@ -105,7 +107,10 @@ const model={
   async move(itemId,delta){return this.action('move',{item_id:itemId,delta});},
   async remove(itemId){return this.action('remove',{item_id:itemId});},
   async send(itemId){return this.action('send',{item_id:itemId});},
-  canIntervene(){return !!this.active && this.running;},
+  // An inflight durable reservation is the stable authority for the button.
+  // `running` is intentionally not used here: it can briefly lag during model
+  // transitions, which previously disabled intervention exactly when needed.
+  canIntervene(){return this.active?.state==='inflight';},
   async intervene(itemId){
     const context=this.selected();
     const result=await this.action('intervene',{item_id:itemId});

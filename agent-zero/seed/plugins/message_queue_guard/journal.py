@@ -22,6 +22,8 @@ class Journal:
         with self.connection() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS contexts (context TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS deleted_contexts (
+                    context TEXT PRIMARY KEY, deleted REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS messages (
                     context TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL,
                     state TEXT NOT NULL, payload TEXT NOT NULL, boundary INTEGER NOT NULL DEFAULT -1,
@@ -64,6 +66,8 @@ class Journal:
 
     def migrate(self, context, items):
         with self.transaction() as db:
+            if db.execute('SELECT 1 FROM deleted_contexts WHERE context=?',(context,)).fetchone():
+                return
             if db.execute('SELECT 1 FROM contexts WHERE context=?', (context,)).fetchone():
                 return
             for position, item in enumerate(items):
@@ -100,6 +104,13 @@ class Journal:
     def lookup(self, context, item_id):
         with self.connection() as db:
             return self.item(db.execute('SELECT * FROM messages WHERE context=? AND id=?',(context,item_id)).fetchone())
+
+    def purge_context(self, context):
+        """Remove queue state only after its owning chat was explicitly deleted."""
+        with self.transaction() as db:
+            db.execute('DELETE FROM messages WHERE context=?',(context,))
+            db.execute('DELETE FROM contexts WHERE context=?',(context,))
+            db.execute('INSERT OR REPLACE INTO deleted_contexts(context,deleted) VALUES(?,?)',(context,time.time()))
 
     def begin_intervention(self, context, item_id):
         with self.transaction() as db:

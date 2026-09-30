@@ -207,9 +207,15 @@ def snapshot(context):
             if active and active['state']=='inflight':
                 journal().block(context.id,active['id'])
         pending=sync(context); active=journal().active(context.id); drafts=journal().rows(context.id,'draft')
+        # The websocket cursor can advance even if the browser fails to render a
+        # particular batch. Return a bounded authoritative tail so the queue's
+        # independent heartbeat can repair the visible history without F5.
+        raw_logs=list(getattr(context.log,'logs',[]) or [])[-160:]
+        recent_logs=[item.output() for item in raw_logs if hasattr(item,'output')]
         return {'items':context.get_output_data('message_queue'),
                 'active':{'id':active['id'],'state':active['state']} if active else None,
-                'draft_id':drafts[0]['id'] if drafts else None,'running':bool(context.is_running())}
+                'draft_id':drafts[0]['id'] if drafts else None,'running':bool(context.is_running()),
+                'logs':recent_logs}
 
 
 def install():

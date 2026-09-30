@@ -34,7 +34,10 @@ class FakeHistory:
 class FakeAgent:
     def __init__(self):
         self.history = FakeHistory()
-        self.context = SimpleNamespace(log=SimpleNamespace(log=lambda **kwargs: None))
+        self.context = SimpleNamespace(
+            log=SimpleNamespace(log=lambda **kwargs: None),
+            get_data=lambda name: None,
+        )
 
     def get_data(self, name):
         return None
@@ -64,7 +67,8 @@ async def main():
     assert end_agent.history.get_tokens() < 800
 
     context = SimpleNamespace(id="unit-test", agent0=agent, get_data=lambda name: {"browser_model_lock": {"preset_name": "Power"}}.get(name))
-    with patch("plugins._model_config.api.model_override.AgentContext.get", return_value=context):
+    with patch("plugins._model_config.api.model_override.AgentContext.get", return_value=context), \
+         patch.object(model_config, "get_chat_model_config", return_value={"name": "chatgpt-browser"}):
         for action in ("set", "set_preset", "clear"):
             result = await object.__new__(ModelOverride).process({"context_id": context.id, "action": action}, None)
             assert result.status_code == 409, (action, result)
@@ -89,6 +93,7 @@ async def main():
         id="frozen-test",
         get_data=lambda name: data.get(name),
         set_data=lambda name, value: data.__setitem__(name, value),
+        log=SimpleNamespace(logs=[]),
     )
     frozen_agent = SimpleNamespace(context=mutable_context, number=0)
     browser_cfg = {"provider": "other", "name": "chatgpt-browser", "api_base": "http://chatgpt-browser-agent:8000/v1", "ctx_length": 65536}

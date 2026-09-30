@@ -9,6 +9,17 @@ def install(recover=False):
     if recover:
         durable.journal().recover()
     from api.message import Message
+    from helpers import persist_chat
+    # API handler classes are dynamically reloaded, so hook the stable storage
+    # function used by every chat-removal path instead of a transient class.
+    if not getattr(persist_chat,'_durable_queue_cleanup',False):
+        original_remove_chat=persist_chat.remove_chat
+        def remove_chat_with_queue_cleanup(ctxid,*args,**kwargs):
+            result=original_remove_chat(ctxid,*args,**kwargs)
+            durable.journal().purge_context(ctxid)
+            return result
+        persist_chat.remove_chat=remove_chat_with_queue_cleanup
+        persist_chat._durable_queue_cleanup=True
     if getattr(Message, '_queue_guard_version', 0)==2: return
     from agent import UserMessage
     from helpers import files, extension, message_queue as mq, persist_chat
