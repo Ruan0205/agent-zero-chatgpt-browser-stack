@@ -15,14 +15,18 @@ class Context:
     id='queue-regression'
     def __init__(self):
         self.data={}; self.output_data={}; self.running=True; self.intervention='original'; self.calls=0
+        self.agent=SimpleNamespace(intervention=None)
         self.log=SimpleNamespace(log=lambda **kwargs:None,logs=[])
     def get_data(self,k): return self.data.get(k)
     def set_data(self,k,v): self.data[k]=v
     def get_output_data(self,k): return self.output_data.get(k)
     def set_output_data(self,k,v): self.output_data[k]=v
     def is_running(self): return self.running
-    def get_agent(self): return None
-    def communicate(self,msg): self.calls+=1; self.intervention=msg; self.running=True; return SimpleNamespace()
+    def get_agent(self): return self.agent
+    def communicate(self,msg):
+        was_running=self.running;self.calls+=1;self.intervention=msg
+        if was_running:self.agent.intervention=msg
+        self.running=True;return SimpleNamespace()
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -97,6 +101,35 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(no=2,type='user',id='other',kvps={},agentno=0),
             SimpleNamespace(no=3,type='response',kvps={'finished':True},agentno=0)]
         self.assertFalse(durable.finish(self.ctx));self.assertIsNotNone(durable.journal().active(self.ctx.id))
+
+    async def test_explicit_queue_intervention_is_delivered_and_can_ack_active_item(self):
+        self.ctx.running=False;await self.send('original','one')
+        self.ctx.running=True;await self.send('correction','two')
+        durable.intervene(self.ctx,'two')
+        active=durable.journal().active(self.ctx.id)
+        self.assertEqual(active['intervention_ids'],['two'])
+        self.assertEqual(mq.get_queue(self.ctx),[])
+        self.assertEqual(self.ctx.agent.intervention.id,'two')
+        self.ctx.running=False
+        self.ctx.log.logs=[SimpleNamespace(no=1,type='user',id='one',kvps={},agentno=0),
+            SimpleNamespace(no=2,type='user',id='two',kvps={},agentno=0),
+            SimpleNamespace(no=3,type='response',id='answer',kvps={'finished':True},agentno=0)]
+        self.assertTrue(durable.finish(self.ctx));self.assertIsNone(durable.journal().active(self.ctx.id))
+
+    async def test_second_intervention_waits_in_queue_until_first_is_consumed(self):
+        self.ctx.running=False;await self.send('original','one')
+        self.ctx.running=True;await self.send('correction','two');await self.send('later','three')
+        durable.intervene(self.ctx,'two')
+        with self.assertRaises(Exception):durable.intervene(self.ctx,'three')
+        self.assertEqual([item['id'] for item in mq.get_queue(self.ctx)],['three'])
+
+    async def test_failure_after_delivery_never_requeues_intervention(self):
+        self.ctx.running=False;await self.send('original','one')
+        self.ctx.running=True;await self.send('correction','two')
+        with patch('helpers.message_queue.log_user_message',side_effect=OSError('history unavailable')):
+            with self.assertRaises(OSError):durable.intervene(self.ctx,'two')
+        self.assertEqual(durable.journal().get(self.ctx.id,'two')['state'],'completed')
+        self.assertEqual(mq.get_queue(self.ctx),[])
 
     async def test_old_pending_head_starts_without_claiming_new_message_consumed(self):
         await self.send('head','one');self.ctx.running=False

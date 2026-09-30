@@ -45,7 +45,7 @@ def main():
     assert env["REPAIR_REQUIRES_BROWSER"] == "true"
     assert env["CHATGPT_REPAIR_UTILITY_VNC_PORT"] == "50088"
     assert env["WA_PHONE"] == ""
-    assert env["STACK_SCHEMA_VERSION"] == "v2.12-stack.13"
+    assert env["STACK_SCHEMA_VERSION"] == "v2.12-stack.14"
 
     configurer = (ROOT / "scripts/configure-integrations.sh").read_text(encoding="utf-8")
     for expected in (

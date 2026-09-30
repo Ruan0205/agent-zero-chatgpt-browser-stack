@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.12-stack.14 — histórico autorreconciliado e intervenção pela fila
+
+- Reconcilia o histórico por HTTP durante uma execução ativa, inclusive quando o
+  WebSocket aparenta estar saudável mas deixou de entregar um evento; o estado
+  “Calling LLM” deixa de depender de atualizar manualmente a página.
+- Adiciona **Intervir agora** a cada mensagem pendente. A mensagem escolhida entra
+  no turno em andamento como correção, sem iniciar uma segunda execução e sem
+  consumir, reordenar ou perder as outras mensagens da fila.
+- Torna a transição da intervenção transacional e recuperável após falha: uma
+  mensagem comprovadamente registrada não é reenviada, enquanto uma tentativa
+  não observada retorna à posição pendente.
+- Restaura o comportamento de acompanhar automaticamente o fim do chat no envio
+  controlado pela fila e cobre os fluxos novos com testes de frontend e backend.
+
 ## v2.12-stack.13 — Kimi opcional, fallback browser e robustez acumulada
 
 - Torna Kimi-K3/We64 opcional por profile. Quando habilitado, Kimi atende chat,

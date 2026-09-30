@@ -44,6 +44,8 @@ class Queue(ApiHandler):
                     # Explicit send also does NOT inject into an active turn.
                     task=durable.dispatch(context,item_id)
                     if not task: raise Conflict('O chat está ocupado, pausado ou tem uma execução interrompida. A fila foi preservada.')
+                elif action=='intervene':
+                    durable.intervene(context,item_id)
                 elif action=='resume':
                     if context.is_running(): raise Conflict('O chat ainda está executando. Não será iniciada uma segunda chamada.')
                     from agent import UserMessage

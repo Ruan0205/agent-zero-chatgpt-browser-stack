@@ -51,7 +51,7 @@ copy_once "$seed_root/settings.json" "$data_root/agent-zero-repair/settings.json
 repair_prompt="$data_root/agent-zero-repair/agents/agent0/prompts/agent.system.main.specifics.md"
 repair_seed="$seed_root/agents/agent0/prompts/agent.system.main.repair.md"
 if [ -f "$repair_prompt" ] && ! cmp -s "$repair_seed" "$repair_prompt"; then
-  repair_backup="$data_root/.stack-backups/${STACK_SCHEMA_VERSION:-v2.12-stack.13}/repair-prompt"
+  repair_backup="$data_root/.stack-backups/${STACK_SCHEMA_VERSION:-v2.12-stack.14}/repair-prompt"
   mkdir -p "$repair_backup"
   cp "$repair_prompt" "$repair_backup/agent.system.main.specifics.md"
 fi

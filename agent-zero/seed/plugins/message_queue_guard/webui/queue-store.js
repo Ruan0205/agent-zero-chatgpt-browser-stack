@@ -6,8 +6,9 @@ import { store as chatsStore } from '/components/sidebar/chats/chats-store.js';
 
 const endpoint='/plugins/message_queue_guard/queue';
 const model={
-  items:[], active:null, context:null, editingId:null, editingContext:null,
-  _timer:null, _polling:false, _saving:null, _busy:false, _draftVersion:0, _submissionEpoch:0,
+  items:[], active:null, running:false, context:null, editingId:null, editingContext:null,
+  _timer:null, _polling:false, _reconciling:false, _lastReconcileAt:0,
+  _saving:null, _busy:false, _draftVersion:0, _submissionEpoch:0,
   start() {
     if(this._timer) return;
     this.supportSavedAttachments();
@@ -34,18 +35,33 @@ const model={
   apply(result,context){
     if(this.selected()!==context) return;
     this.context=context; this.items=result.items||[]; this.active=result.active;
+    this.running=!!result.running;
+  },
+  async reconcile(context,force=false){
+    if(this._reconciling || this.selected()!==context || typeof globalThis.poll!=='function') return;
+    const now=Date.now();
+    if(!force && now-this._lastReconcileAt<2500) return;
+    this._lastReconcileAt=now;this._reconciling=true;
+    try{await globalThis.poll();}
+    catch(error){console.warn('Reconciliação visual temporariamente indisponível.');}
+    finally{this._reconciling=false;}
+  },
+  reconcileNow(context){
+    this._lastReconcileAt=0;
+    setTimeout(()=>this.reconcile(context,true),150);
   },
   async refresh(){
     if(this._polling || this._busy) return;
     const context=this.selected();
     const epoch=this._submissionEpoch;
-    if(!context){this.items=[];this.active=null;return;}
+    if(!context){this.items=[];this.active=null;this.running=false;return;}
     this._polling=true;
     try{
       const changed=this.context!==context;
       const result=await this.request('snapshot',{},context);
       if(epoch!==this._submissionEpoch) return;
       this.apply(result,context);
+      if(result.running || result.active) void this.reconcile(context);
       if(changed && this.selected()===context){
         this.editingId=null;this.editingContext=null;
       }
@@ -89,6 +105,13 @@ const model={
   async move(itemId,delta){return this.action('move',{item_id:itemId,delta});},
   async remove(itemId){return this.action('remove',{item_id:itemId});},
   async send(itemId){return this.action('send',{item_id:itemId});},
+  canIntervene(){return !!this.active && this.running;},
+  async intervene(itemId){
+    const context=this.selected();
+    const result=await this.action('intervene',{item_id:itemId});
+    if(result){this.reconcileNow(context);globalThis.forceScrollChatToBottom?.();}
+    return result;
+  },
   async resume(){return this.action('resume');},
   saveDraftSoon(){
     const context=this.editingContext,id=this.editingId,version=++this._draftVersion;

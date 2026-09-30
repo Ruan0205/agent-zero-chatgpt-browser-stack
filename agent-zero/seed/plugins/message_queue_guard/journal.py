@@ -101,6 +101,52 @@ class Journal:
         with self.connection() as db:
             return self.item(db.execute('SELECT * FROM messages WHERE context=? AND id=?',(context,item_id)).fetchone())
 
+    def begin_intervention(self, context, item_id):
+        with self.transaction() as db:
+            active=db.execute("SELECT * FROM messages WHERE context=? AND state='inflight'",(context,)).fetchone()
+            if not active:
+                raise Conflict('Não há uma execução ativa que possa receber a intervenção.')
+            row=db.execute("SELECT * FROM messages WHERE context=? AND id=? AND state='pending'",(context,item_id)).fetchone()
+            if not row:
+                raise Conflict('A mensagem já saiu da espera e não pode ser usada como intervenção.')
+            db.execute("UPDATE messages SET state='intervening',updated=? WHERE context=? AND id=?",(time.time(),context,item_id))
+            return self.item(row),active['id']
+
+    def complete_intervention(self, context, item_id, active_id):
+        with self.transaction() as db:
+            row=db.execute("SELECT id FROM messages WHERE context=? AND id=? AND state='intervening'",(context,item_id)).fetchone()
+            active=db.execute("SELECT * FROM messages WHERE context=? AND id=? AND state IN ('inflight','blocked')",(context,active_id)).fetchone()
+            if not row or not active:
+                raise Conflict('A execução mudou antes de confirmar a intervenção.')
+            payload=json.loads(active['payload'])
+            payload['intervention_ids']=list(dict.fromkeys([*(payload.get('intervention_ids') or []),item_id]))
+            db.execute('UPDATE messages SET payload=?,updated=? WHERE context=? AND id=?',(json.dumps(payload),time.time(),context,active_id))
+            db.execute("UPDATE messages SET state='completed',payload='{}',updated=? WHERE context=? AND id=?",(time.time(),context,item_id))
+
+    def cancel_intervention(self, context, item_id):
+        with self.transaction() as db:
+            db.execute("UPDATE messages SET state='pending',updated=? WHERE context=? AND id=? AND state='intervening'",(time.time(),context,item_id))
+
+    def settle_observed_intervention(self, context, item_id):
+        with self.transaction() as db:
+            db.execute("UPDATE messages SET state='completed',payload='{}',updated=? WHERE context=? AND id=? AND state='intervening'",(time.time(),context,item_id))
+
+    def reconcile_interventions(self, context, observed_ids):
+        with self.connection() as db:
+            rows=list(db.execute("SELECT id FROM messages WHERE context=? AND state='intervening'",(context,)))
+        for row in rows:
+            item_id=row['id']
+            active=self.active(context)
+            if item_id in observed_ids and active:
+                self.complete_intervention(context,item_id,active['id'])
+            elif item_id in observed_ids:
+                # The original turn may already have completed between the log
+                # write and a process crash. The observed user log is proof that
+                # replaying this intervention would duplicate it.
+                self.settle_observed_intervention(context,item_id)
+            else:
+                self.cancel_intervention(context,item_id)
+
     def reserve(self, context, boundary, item_id=None):
         with self.transaction() as db:
             if db.execute("SELECT 1 FROM messages WHERE context=? AND state IN ('inflight','blocked')",(context,)).fetchone():

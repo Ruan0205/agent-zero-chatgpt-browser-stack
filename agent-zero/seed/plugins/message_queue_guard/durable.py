@@ -20,6 +20,8 @@ def journal():
 
 def ensure(context):
     journal().migrate(context.id, context.get_data('message_queue') or [])
+    observed={getattr(item,'id',None) for item in getattr(context.log,'logs',[]) if getattr(item,'id',None)}
+    journal().reconcile_interventions(context.id,observed)
 
 
 def sync(context):
@@ -79,6 +81,39 @@ def dispatch(context, item_id=None):
             raise
         mark_dirty_for_context(context.id,reason='message_queue_dispatch')
         return task
+
+
+def intervene(context,item_id):
+    """Move one pending message into the active turn without starting a competing run."""
+    from agent import UserMessage
+    from helpers import message_queue as mq, persist_chat
+    from helpers.state_monitor_integration import mark_dirty_for_context
+    with LOCK:
+        ensure(context)
+        if not context.is_running():
+            raise Conflict('O chat não está mais executando. Envie a mensagem normalmente pela fila.')
+        agent=context.get_agent()
+        if getattr(agent,'intervention',None):
+            raise Conflict('Já existe uma intervenção aguardando consumo pelo agente. Tente novamente depois que ela aparecer no histórico.')
+        item,active_id=journal().begin_intervention(context.id,item_id)
+        try:
+            context.communicate(UserMessage(message=item['text'],attachments=item['attachments'],id=item['id']))
+            # Commit the delivery receipt before ancillary UI/history work. Once
+            # communicate() accepted the intervention, no later failure may put
+            # it back in pending state and replay it to the model.
+            journal().complete_intervention(context.id,item['id'],active_id)
+            mq.log_user_message(context,item['text'],item['attachments'],item['id'],source=' (intervenção da fila)')
+            sync(context)
+            persist_chat.save_tmp_chat(context)
+            mark_dirty_for_context(context.id,reason='message_queue_intervention')
+            return item
+        except Exception:
+            # Only a message still in the uncertain pre-receipt state is safe to
+            # return to the queue. A completed receipt proves it was accepted.
+            if journal().get(context.id,item['id'])['state']=='intervening':
+                journal().cancel_intervention(context.id,item['id'])
+            sync(context)
+            raise
 
 
 def submit(context,text,attachments,message_id,draft_id=None):
@@ -141,14 +176,16 @@ def finish(context):
         active=journal().active(context.id)
         if not active:
             return False
-        # The last real user input before a final answer must belong to this
-        # reservation. A direct API intervention cannot acknowledge it by mistake.
+        # The last real user input must belong to this reservation or to an
+        # explicit queue intervention attached to it. Unrelated API messages
+        # still cannot acknowledge the active item by mistake.
         final=False;last_user_id=None
+        accepted_ids={active['id'],*(active.get('intervention_ids') or [])}
         for log in getattr(context.log,'logs',[]):
             if getattr(log,'no',-1)<=active['boundary']:continue
             if getattr(log,'type','')=='user':last_user_id=getattr(log,'id',None)
             if (getattr(log,'type','')=='response' and (getattr(log,'kvps',None) or {}).get('finished') is True
-                and getattr(log,'agentno',0)==0 and last_user_id==active['id']):
+                and getattr(log,'agentno',0)==0 and last_user_id in accepted_ids):
                 final=True
         if not final:
             return False

@@ -32,6 +32,23 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(self.db.active('a')['text'],'pedido')
         self.assertEqual(self.db.rows('a'),[])
         self.db.acknowledge('a','one');self.assertIsNone(self.db.active('a'))
+    def test_pending_message_can_be_attached_as_intervention(self):
+        self.put('active');self.put('correction');self.db.reserve('a',7,'active')
+        item,active_id=self.db.begin_intervention('a','correction')
+        self.assertEqual(item['id'],'correction');self.assertEqual(active_id,'active')
+        self.db.complete_intervention('a','correction',active_id)
+        self.assertEqual(self.db.rows('a'),[])
+        self.assertEqual(self.db.active('a')['intervention_ids'],['correction'])
+    def test_rejected_intervention_returns_to_same_queue_position(self):
+        self.put('active');self.put('correction');self.put('later');self.db.reserve('a',7,'active')
+        self.db.begin_intervention('a','correction');self.db.cancel_intervention('a','correction')
+        self.assertEqual([item['id'] for item in self.db.rows('a')],['correction','later'])
+    def test_observed_intervention_is_not_replayed_after_active_finishes(self):
+        self.put('active');self.put('correction');self.db.reserve('a',7,'active')
+        self.db.begin_intervention('a','correction');self.db.acknowledge('a','active')
+        self.db.reconcile_interventions('a',{'correction'})
+        self.assertEqual(self.db.rows('a'),[])
+        self.assertEqual(self.db.lookup('a','correction')['state'],'completed')
     def test_restart_blocks_uncertain_work_without_replaying(self):
         self.put();self.put('two');self.db.reserve('a',7)
         restarted=Journal(self.path);restarted.recover()

@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 const source=readFileSync(new URL('../webui/queue-store.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace('export {store};','');
 function setup(){
-  const state={selected:'a',requests:[],toasts:[],result:{items:[],active:null},focus:0};
+  const state={selected:'a',requests:[],toasts:[],result:{items:[],active:null},focus:0,polls:0};
   const inputStore={message:'',focus(){state.focus++},adjustTextareaHeight(){}};
   const attachmentsStore={attachments:[],isImageFile:n=>n.endsWith('.png'),getFilePreviewUrl:n=>'/file/'+n,
     getAttachmentDisplayInfo:n=>({filename:n}),addAttachment(a){this.attachments.push(a)},
@@ -13,7 +13,7 @@ function setup(){
     callJsonApi:async (_endpoint,payload)=>{state.requests.push(payload);return typeof state.result==='function'?state.result(payload):state.result},
     setTimeout,clearTimeout,setInterval:()=>1,document:{addEventListener(){}},console,
     URL:{createObjectURL:file=>{if(!file)throw new Error('missing file');return 'blob:test'}},
-    toast:(...a)=>state.toasts.push(a)};
+    toast:(...a)=>state.toasts.push(a),poll:async()=>{state.polls++;return {ok:true,updated:true}}};
   box.globalThis=box;vm.createContext(box);vm.runInContext(source+'\nthis.store=store;',box);
   return {state,inputStore,attachmentsStore,store:box.store};
 }
@@ -79,4 +79,14 @@ test('poll failure does not remove previously confirmed waiting messages',async(
 });
 test('no simultaneous polling while mutating queue',async()=>{
   const x=setup();x.store._busy=true;await x.store.refresh();assert.equal(x.state.requests.length,0);
+});
+test('active execution reconciles chat history even while websocket looks healthy',async()=>{
+  const x=setup();x.state.result={items:[],active:{id:'one',state:'inflight'},running:true};
+  await x.store.refresh();assert.equal(x.state.polls,1);assert.equal(x.store.running,true);
+});
+test('queued item can be explicitly directed into the active turn',async()=>{
+  const x=setup();x.store.active={id:'one',state:'inflight'};x.store.running=true;
+  x.state.result={items:[],active:{id:'one',state:'inflight'},running:true};
+  await x.store.intervene('two');
+  assert.equal(x.state.requests[0].action,'intervene');assert.equal(x.state.requests[0].item_id,'two');
 });

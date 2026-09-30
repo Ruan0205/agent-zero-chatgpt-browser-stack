@@ -18,6 +18,7 @@
             <button :disabled="index===0 || $store.durableQueue._busy" @click="$store.durableQueue.move(item.id,-1)" title="Mover para cima" aria-label="Mover para cima"><x-icon name="arrow_upward"></x-icon></button>
             <button :disabled="index===$store.durableQueue.items.length-1 || $store.durableQueue._busy" @click="$store.durableQueue.move(item.id,1)" title="Mover para baixo" aria-label="Mover para baixo"><x-icon name="arrow_downward"></x-icon></button>
             <button :disabled="$store.durableQueue._busy" @click="$store.durableQueue.edit(item.id)" title="Editar texto e anexos" aria-label="Editar mensagem"><x-icon name="edit"></x-icon></button>
+            <button :disabled="$store.durableQueue._busy || !$store.durableQueue.canIntervene()" @click="$store.durableQueue.intervene(item.id)" title="Usar agora como correção do turno em andamento" aria-label="Intervir agora"><x-icon name="subdirectory_arrow_left"></x-icon></button>
             <button :disabled="$store.durableQueue._busy || !!$store.durableQueue.active" @click="$store.durableQueue.send(item.id)" title="Enviar quando o chat estiver livre" aria-label="Enviar mensagem"><x-icon name="send"></x-icon></button>
             <button :disabled="$store.durableQueue._busy" @click="$store.durableQueue.remove(item.id)" title="Remover da fila" aria-label="Remover mensagem"><x-icon name="close"></x-icon></button>
           </div>
