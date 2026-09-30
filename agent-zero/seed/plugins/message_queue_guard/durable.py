@@ -110,7 +110,7 @@ def intervene(context,item_id):
         except Exception:
             # Only a message still in the uncertain pre-receipt state is safe to
             # return to the queue. A completed receipt proves it was accepted.
-            if journal().get(context.id,item['id'])['state']=='intervening':
+            if journal().lookup(context.id,item['id'])['state']=='intervening':
                 journal().cancel_intervention(context.id,item['id'])
             sync(context)
             raise

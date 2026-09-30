@@ -128,7 +128,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.ctx.running=True;await self.send('correction','two')
         with patch('helpers.message_queue.log_user_message',side_effect=OSError('history unavailable')):
             with self.assertRaises(OSError):durable.intervene(self.ctx,'two')
-        self.assertEqual(durable.journal().get(self.ctx.id,'two')['state'],'completed')
+        self.assertEqual(durable.journal().lookup(self.ctx.id,'two')['state'],'completed')
         self.assertEqual(mq.get_queue(self.ctx),[])
 
     async def test_old_pending_head_starts_without_claiming_new_message_consumed(self):
