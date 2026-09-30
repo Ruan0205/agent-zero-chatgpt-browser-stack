@@ -10,6 +10,20 @@ _journal = None
 _recovery_thread = None
 
 
+def browser_nudge_available(context):
+    """Nudge is only meaningful for an idle ChatGPT Browser conversation."""
+    override=context.get_data('chat_model_override') or {}
+    chat=override.get('chat',{}) if isinstance(override,dict) else {}
+    name=str(chat.get('name','')) if isinstance(chat,dict) else ''
+    if not name:
+        try:
+            from plugins._model_config.helpers.model_config import get_chat_model_config
+            name=str((get_chat_model_config(context.agent0) or {}).get('name',''))
+        except Exception:
+            name=''
+    return name.startswith('chatgpt-browser') and not bool(context.is_running())
+
+
 def journal():
     global _journal
     if _journal is None:
@@ -215,7 +229,7 @@ def snapshot(context):
         return {'items':context.get_output_data('message_queue'),
                 'active':{'id':active['id'],'state':active['state']} if active else None,
                 'draft_id':drafts[0]['id'] if drafts else None,'running':bool(context.is_running()),
-                'logs':recent_logs}
+                'logs':recent_logs,'nudge_available':browser_nudge_available(context)}
 
 
 def install():

@@ -12,7 +12,7 @@ function setup(){
   const box={createStore:(_n,m)=>m,inputStore,attachmentsStore,chatsStore:{getSelectedChatId:()=>state.selected},
     setMessages:async logs=>state.rendered.push(...logs),
     callJsonApi:async (_endpoint,payload)=>{state.requests.push(payload);return typeof state.result==='function'?state.result(payload):state.result},
-    setTimeout,clearTimeout,setInterval:()=>1,document:{addEventListener(){}},console,
+    setTimeout,clearTimeout,setInterval:()=>1,document:{addEventListener(){},querySelector:()=>null},console,
     URL:{createObjectURL:file=>{if(!file)throw new Error('missing file');return 'blob:test'}},
     toast:(...a)=>state.toasts.push(a),poll:async()=>{state.polls++;return {ok:true,updated:true}}};
   box.globalThis=box;vm.createContext(box);vm.runInContext(source+'\nthis.store=store;',box);
@@ -89,6 +89,10 @@ test('active execution reconciles chat history even while websocket looks health
 test('intervention remains enabled when transient running projection lags',()=>{
   const x=setup();x.store.active={id:'one',state:'inflight'};x.store.running=false;
   assert.equal(x.store.canIntervene(),true);
+});
+test('nudge stays unavailable for Kimi and while a browser turn is running',()=>{
+  const x=setup();x.store.apply({items:[],active:{id:'one',state:'inflight'},running:true,nudge_available:false},'a');
+  assert.equal(x.store.nudgeAvailable,false);
 });
 test('queued item can be explicitly directed into the active turn',async()=>{
   const x=setup();x.store.active={id:'one',state:'inflight'};x.store.running=true;

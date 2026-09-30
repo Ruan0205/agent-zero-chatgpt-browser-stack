@@ -33,6 +33,13 @@ class QueueApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result['logs']),160)
         self.assertEqual(result['logs'][0]['id'],'log-10')
         self.assertEqual(result['logs'][-1]['id'],'log-169')
+    async def test_nudge_is_not_offered_for_kimi_or_a_running_browser(self):
+        self.data['chat_model_override']={'chat':{'name':'kimi-k3'}}
+        self.assertFalse((await self.call())['nudge_available'])
+        self.data['chat_model_override']={'chat':{'name':'chatgpt-browser'}}
+        self.assertFalse((await self.call())['nudge_available'])
+        self.ctx.is_running=lambda:False
+        self.assertTrue((await self.call())['nudge_available'])
     async def test_edit_returns_complete_text_and_attachment_paths(self):
         durable.add(self.ctx,'x'*1000,['/a0/usr/uploads/file.png'],'one')
         result=await self.call('edit',item_id='one');self.assertEqual(len(result['draft']['text']),1000)

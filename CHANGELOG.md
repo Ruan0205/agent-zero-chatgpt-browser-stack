@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.12-stack.16 — intervenção explícita e Nudge sem ambiguidade
+
+- Exibe **Intervir agora** com texto em cada mensagem pendente durante uma
+  execução e oculta o envio normal bloqueado nesse estado.
+- Renomeia Nudge visualmente para **Retomar navegador**, deixa a ação desabilitada
+  para Kimi e enquanto o navegador ainda trabalha, e explica na própria fila que
+  ela não envia mensagens.
+- Estende o teste real para reproduzir exatamente a interface observada: ação
+  textual visível, envio conflitante oculto, retomada desabilitada e intervenção
+  consumida sem reload.
+- Mantém a autenticação dos testes pelo `.env`, sem depender de login manual nem
+  registrar credenciais no código, nos logs ou na documentação.
+
 ## v2.12-stack.15 — interface autoritativa e regressões verificadas
 
 - Torna a reconciliação do histórico independente do cursor do WebSocket: a API

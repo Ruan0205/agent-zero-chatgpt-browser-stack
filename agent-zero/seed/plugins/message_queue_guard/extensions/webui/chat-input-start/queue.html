@@ -9,6 +9,7 @@
       <span x-text="$store.durableQueue.active?.state==='blocked'?'Execução interrompida — mensagem preservada.':'Mensagem em execução — aguardando resposta final.'"></span>
       <button x-show="$store.durableQueue.active?.state==='blocked'" @click="$store.durableQueue.resume()">Retomar execução</button>
     </div>
+    <div class="dq-hint" x-show="$store.durableQueue.active?.state==='inflight'">Para corrigir a execução atual, use <strong>Intervir agora</strong>. <strong>Retomar navegador</strong> não envia mensagens.</div>
     <div class="dq-items">
       <template x-for="(item,index) in $store.durableQueue.items" :key="item.id">
         <div class="dq-item">
@@ -18,8 +19,8 @@
             <button :disabled="index===0 || $store.durableQueue._busy" @click="$store.durableQueue.move(item.id,-1)" title="Mover para cima" aria-label="Mover para cima"><x-icon name="arrow_upward"></x-icon></button>
             <button :disabled="index===$store.durableQueue.items.length-1 || $store.durableQueue._busy" @click="$store.durableQueue.move(item.id,1)" title="Mover para baixo" aria-label="Mover para baixo"><x-icon name="arrow_downward"></x-icon></button>
             <button :disabled="$store.durableQueue._busy" @click="$store.durableQueue.edit(item.id)" title="Editar texto e anexos" aria-label="Editar mensagem"><x-icon name="edit"></x-icon></button>
-            <button :disabled="$store.durableQueue._busy || !$store.durableQueue.canIntervene()" @click="$store.durableQueue.intervene(item.id)" title="Usar agora como correção do turno em andamento" aria-label="Intervir agora"><x-icon name="subdirectory_arrow_left"></x-icon></button>
-            <button :disabled="$store.durableQueue._busy || !!$store.durableQueue.active" @click="$store.durableQueue.send(item.id)" title="Enviar quando o chat estiver livre" aria-label="Enviar mensagem"><x-icon name="send"></x-icon></button>
+            <button class="dq-intervene" x-show="$store.durableQueue.active" :disabled="$store.durableQueue._busy || !$store.durableQueue.canIntervene()" @click="$store.durableQueue.intervene(item.id)" title="Enviar agora como correção do turno em andamento" aria-label="Intervir agora"><x-icon name="subdirectory_arrow_left"></x-icon><span>Intervir agora</span></button>
+            <button x-show="!$store.durableQueue.active" :disabled="$store.durableQueue._busy" @click="$store.durableQueue.send(item.id)" title="Enviar esta mensagem" aria-label="Enviar mensagem"><x-icon name="send"></x-icon></button>
             <button :disabled="$store.durableQueue._busy" @click="$store.durableQueue.remove(item.id)" title="Remover da fila" aria-label="Remover mensagem"><x-icon name="close"></x-icon></button>
           </div>
         </div>
@@ -32,14 +33,16 @@
     .durable-queue{margin:0 0 8px;border:1px solid var(--color-border);border-radius:12px;background:color-mix(in srgb,var(--color-primary) 5%,var(--color-background));padding:10px 12px;width:100%;box-sizing:border-box}
     .dq-heading{display:flex;justify-content:space-between;font-size:12px;font-weight:600;gap:12px;margin-bottom:6px}
     .dq-heading small,.dq-preview small{color:var(--color-text-secondary);font-weight:400}
+    .dq-hint{font-size:11px;color:var(--color-text-secondary);margin:2px 0 6px}
     .dq-items{max-height:180px;overflow:auto}
     .dq-item{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--color-border)}
     .dq-order{min-width:20px;font-size:12px;color:var(--color-primary)}
     .dq-preview{min-width:0;flex:1;display:flex;flex-direction:column;font-size:12px}
     .dq-preview>span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-    .dq-actions{display:flex;gap:2px}.dq-actions button,.dq-active button{border:0;background:transparent;color:var(--color-primary);padding:5px;cursor:pointer;border-radius:5px;display:flex;align-items:center}
+    .dq-actions{display:flex;gap:2px}.dq-actions button,.dq-active button{border:0;background:transparent;color:var(--color-primary);padding:5px;cursor:pointer;border-radius:5px;display:flex;align-items:center;gap:4px}
+    .dq-actions .dq-intervene{border:1px solid color-mix(in srgb,var(--color-primary) 55%,transparent);font-weight:600;padding-inline:8px}
     .dq-actions button:hover{background:var(--color-background-hover)}.dq-actions button:disabled{opacity:.3;cursor:default}
     .dq-active{font-size:12px;color:var(--color-text-secondary);display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:5px}
-    .dq-actions x-icon{font-size:17px}@media(max-width:500px){.dq-actions{gap:0}.dq-actions button{padding:3px}.dq-heading small{display:none}}
+    .dq-actions x-icon{font-size:17px}@media(max-width:500px){.dq-actions{gap:0}.dq-actions button{padding:3px}.dq-heading small,.dq-intervene span{display:none}}
   </style>
 </div>

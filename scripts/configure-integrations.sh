@@ -69,7 +69,7 @@ if [ "$whatsapp" = --whatsapp ]; then
   profiles="${profiles},whatsapp"
 fi
 set_env COMPOSE_PROFILES "$profiles"
-set_env STACK_SCHEMA_VERSION v2.12-stack.15
+set_env STACK_SCHEMA_VERSION v2.12-stack.16
 chmod 0600 .env
 docker compose config --quiet
 echo "Modo '$mode' configurado; profiles: $profiles"

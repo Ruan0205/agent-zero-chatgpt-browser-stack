@@ -7,7 +7,7 @@ import { setMessages } from '/js/messages.js';
 
 const endpoint='/plugins/message_queue_guard/queue';
 const model={
-  items:[], active:null, running:false, context:null, editingId:null, editingContext:null,
+  items:[], active:null, running:false, nudgeAvailable:false, context:null, editingId:null, editingContext:null,
   _timer:null, _polling:false, _reconciling:false, _lastReconcileAt:0,
   _saving:null, _busy:false, _draftVersion:0, _submissionEpoch:0,
   start() {
@@ -36,7 +36,15 @@ const model={
   apply(result,context){
     if(this.selected()!==context) return;
     this.context=context; this.items=result.items||[]; this.active=result.active;
-    this.running=!!result.running;
+    this.running=!!result.running;this.nudgeAvailable=!!result.nudge_available;
+    this.updateNudge();
+  },
+  updateNudge(){
+    const button=document.querySelector?.('#nudges_window');
+    if(!button) return;
+    button.disabled=!this.nudgeAvailable;
+    button.title=this.nudgeAvailable?'Retomar o ChatGPT Browser que parou':'Não envia mensagens. Use Intervir agora na fila; só fica disponível se o ChatGPT Browser parar.';
+    const label=button.querySelector?.('p');if(label) label.textContent='Retomar navegador';
   },
   async reconcile(context,force=false){
     if(this._reconciling || this.selected()!==context || typeof globalThis.poll!=='function') return;
@@ -55,7 +63,7 @@ const model={
     if(this._polling || this._busy) return;
     const context=this.selected();
     const epoch=this._submissionEpoch;
-    if(!context){this.items=[];this.active=null;this.running=false;return;}
+    if(!context){this.items=[];this.active=null;this.running=false;this.nudgeAvailable=false;this.updateNudge();return;}
     this._polling=true;
     try{
       const changed=this.context!==context;

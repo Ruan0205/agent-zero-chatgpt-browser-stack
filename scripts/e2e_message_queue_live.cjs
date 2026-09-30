@@ -63,6 +63,23 @@ async function compose(page, text) {
   });
   evidence.checks.intervention_button = intervention;
   if (!intervention.found || intervention.disabled) throw new Error(`Intervention unavailable: ${JSON.stringify(intervention)}`);
+  evidence.checks.intervention_label_visible = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('.dq-item')].find(item => item.innerText.includes('E2E-INTERVENE-NOW'));
+    const button = row?.querySelector('[aria-label="Intervir agora"]');
+    return !!button && button.innerText.includes('Intervir agora') && button.offsetParent !== null;
+  });
+  evidence.checks.blocked_send_hidden = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('.dq-item')].find(item => item.innerText.includes('E2E-INTERVENE-NOW'));
+    const button = row?.querySelector('[aria-label="Enviar mensagem"]');
+    return !!button && button.offsetParent === null;
+  });
+  evidence.nudge_ui = await page.evaluate(() => {
+    const button = document.querySelector('#nudges_window');
+    return button ? {disabled:button.disabled,text:button.innerText,title:button.title} : null;
+  });
+  evidence.checks.nudge_is_not_message_action = !!evidence.nudge_ui && evidence.nudge_ui.disabled &&
+    evidence.nudge_ui.text.includes('Retomar navegador') && await page.evaluate(() =>
+      document.querySelector('.dq-hint')?.innerText.includes('não envia mensagens'));
 
   await page.evaluate(() => {
     const row = [...document.querySelectorAll('.dq-item')].find(item => item.innerText.includes('E2E-INTERVENE-NOW'));

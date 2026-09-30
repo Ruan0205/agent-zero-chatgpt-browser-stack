@@ -1,7 +1,7 @@
 # Agent Zero + ChatGPT Browser Stack
 
 Clone reproduzível da stack Agent Zero desta instalação. A release atual é
-**`v2.12-stack.15`**. Instale pelo tag; `main` representa a mesma fonte depois da
+**`v2.12-stack.16`**. Instale pelo tag; `main` representa a mesma fonte depois da
 publicação. Tags anteriores servem apenas para rollback.
 
 O Git contém código, migrações e exemplos. Não contém contas, chaves, senhas,
@@ -81,7 +81,7 @@ se a ativação da sua chave informar outro host, preserve exatamente esse host 
 ## Instalação
 
 ```bash
-git clone --branch v2.12-stack.15 --depth 1 \
+git clone --branch v2.12-stack.16 --depth 1 \
   https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack.git
 cd agent-zero-chatgpt-browser-stack
 ./scripts/setup.sh
@@ -133,8 +133,8 @@ personalizações reais.
 
 ```bash
 git fetch --tags origin
-git checkout v2.12-stack.15
-sed -i 's/^STACK_SCHEMA_VERSION=.*/STACK_SCHEMA_VERSION=v2.12-stack.15/' .env
+git checkout v2.12-stack.16
+sed -i 's/^STACK_SCHEMA_VERSION=.*/STACK_SCHEMA_VERSION=v2.12-stack.16/' .env
 
 # A chave nova que já está no servidor deve permanecer intacta.
 ./scripts/configure-integrations.sh kimi       # ou browser; acrescente --whatsapp se usado
@@ -145,8 +145,8 @@ docker compose up -d --remove-orphans
 ```
 
 A migração é idempotente, guarda backups em
-`data/.stack-backups/v2.12-stack.15/` e registra o resultado em
-`data/.stack-migrations/v2.12-stack.15.json`. Plugins mantidos pela stack são
+`data/.stack-backups/v2.12-stack.16/` e registra o resultado em
+`data/.stack-migrations/v2.12-stack.16.json`. Plugins mantidos pela stack são
 montados diretamente da release; uma cópia antiga no volume não prevalece mais.
 
 ## Verificação de desenvolvimento
@@ -197,7 +197,7 @@ administrativo real ao host; exponha somente em rede confiável e leia `SECURITY
 Copie todo o bloco e preencha apenas as escolhas indicadas no final.
 
 ```text
-Instale do zero a release v2.12-stack.15 do repositório
+Instale do zero a release v2.12-stack.16 do repositório
 https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack em um servidor Linux.
 O resultado deve ser um clone funcional desta release, sem copiar chats, cookies,
 contas, senhas, chaves ou dados de outra máquina. Trabalhe até validar o modo escolhido;
@@ -205,7 +205,7 @@ se um teste externo não puder ser concluído, declare-o como pendência e não 
 
 REGRAS DE SEGURANÇA
 1. Não altere aplicações fora desta stack. Não apague volumes ou arquivos desconhecidos.
-2. Clone exatamente o tag v2.12-stack.15 e registre tag, SHA e `git status`.
+2. Clone exatamente o tag v2.12-stack.16 e registre tag, SHA e `git status`.
 3. Execute `./scripts/setup.sh`; segredos ficam somente em `.env` com modo 0600.
 4. Nunca peça senha do ChatGPT/WhatsApp por texto: abra a VNC/interface para o usuário.
 5. Não grave chaves em comandos, logs, README, Git, artefatos ou respostas.
@@ -279,7 +279,7 @@ Ele exige preservar tanto a chave quanto alterações exclusivas daquele servido
 
 ```text
 Atualize a instalação existente de
-https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack para v2.12-stack.15.
+https://github.com/Ruan0205/agent-zero-chatgpt-browser-stack para v2.12-stack.16.
 A instalação já possui uma chave de API nova: NÃO a substitua, imprima, mova para o Git
 nem peça que eu a cole no chat. Preserve também todas as modificações exclusivas que já
 funcionam neste servidor. A atualização deve incorporar por merge consciente todas as
@@ -295,7 +295,7 @@ CHECKPOINT ANTES DE MUDAR
 3. Se houver mudanças locais, crie uma branch/checkpoint. Nunca use reset --hard,
    `down -v`, limpeza ampla ou substituição cega do `.env`/`data`.
 
-ATUALIZAÇÕES OBRIGATÓRIAS DA v2.12-stack.15
+ATUALIZAÇÕES OBRIGATÓRIAS DA v2.12-stack.16
 - backend selecionável: Kimi-K3/We64 opcional ou fallback integral ChatGPT Browser;
   WhatsApp/Meta AI opcional por profile, sem dependências rígidas;
 - Kimi como chat, Utility e reparador com contexto 1M; até dois subagentes; imagens
@@ -322,12 +322,12 @@ ATUALIZAÇÕES OBRIGATÓRIAS DA v2.12-stack.15
 - ferramentas job_status, browser_bridge_status, artifact_verify, server_diagnostics,
   project_check e tasks.list_tasks; VS Code/terminal e memória protegidos;
 - fontes dos plugins recentes montadas diretamente da release para impedir cópia antiga
-  no volume; migração idempotente com backup e schema v2.12-stack.15;
+  no volume; migração idempotente com backup e schema v2.12-stack.16;
 - recuperação automática de eventos visuais perdidos durante execução e intervenção
   explícita de qualquer mensagem pendente no turno ativo, sem segunda run.
 
 PROCEDIMENTO
-1. Busque o tag v2.12-stack.15, confira SHA/release e compare cada arquivo local com a
+1. Busque o tag v2.12-stack.16, confira SHA/release e compare cada arquivo local com a
    release. Mescle personalizações; não copie arquivos antigos por cima das correções.
 2. Preserve a API key atual. Determine o modo já desejado:
    - Kimi: preserve API_KEY_OTHER e KIMI_UPSTREAM_URL atuais; execute
@@ -335,7 +335,7 @@ PROCEDIMENTO
    - Sem Kimi: execute `./scripts/configure-integrations.sh browser`; ChatGPT Browser
      será chat, Utility e reparador, sem exigir We64.
    Não troque de modo sem instrução do usuário.
-3. Defina STACK_SCHEMA_VERSION=v2.12-stack.15, valide os dois Compose profiles sem mostrar
+3. Defina STACK_SCHEMA_VERSION=v2.12-stack.16, valide os dois Compose profiles sem mostrar
    segredos, construa antes da parada final e recrie com `--remove-orphans`.
 4. Verifique hashes das fontes montadas dentro de agent-zero e agent-zero-repair. Confirme
    marcador/backups da migração. Preserve chats, memórias, fila, uploads, workspaces,
@@ -360,7 +360,7 @@ restaure exatamente o checkpoint, recrie as imagens/serviços anteriores e execu
 tests da versão antiga. Relate erro, evidência, tentativas e condição para retomar.
 
 ENTREGA
-Só mantenha v2.12-stack.15 após PASS nos testes aplicáveis. Informe versão anterior/nova,
+Só mantenha v2.12-stack.16 após PASS nos testes aplicáveis. Informe versão anterior/nova,
 SHA, profiles ativos, mudanças locais preservadas, backup/rollback, PASS/FAIL por grupo e
 pendências externas. Nunca alegue teste que não executou e nunca exponha a chave.
 ```
