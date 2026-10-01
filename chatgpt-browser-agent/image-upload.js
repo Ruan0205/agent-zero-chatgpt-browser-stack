@@ -19,15 +19,20 @@ function imageUploadTimeoutMs(count, perImageMs=180_000) {
 }
 
 function isImageUploadTimeout(error) {
-  return /IMAGE_UPLOAD_TIMEOUT: a imagem não carregou/.test(String(error?.message||error));
+  return /IMAGE_UPLOAD_(?:TIMEOUT|FAILED):/.test(String(error?.message||error));
 }
 
-function imageUploadFailureAnswer() {
+function imageUploadFailureAnswer(error) {
+  const rejected=/IMAGE_UPLOAD_FAILED:/.test(String(error?.message||error));
   return {
-    thoughts:['O envio da imagem ficou pendente por três minutos; o rascunho e o anexo foram removidos sem enviar a mensagem.'],
+    thoughts:[rejected
+      ? 'O compositor do ChatGPT recusou o arquivo; o rascunho e o anexo foram removidos sem enviar a mensagem.'
+      : 'O envio da imagem ficou pendente por três minutos; o rascunho e o anexo foram removidos sem enviar a mensagem.'],
     headline:'Imagem não carregada',
     tool_name:'response',
-    tool_args:{text:'a imagem não carregou'},
+    tool_args:{text:rejected
+      ? 'O ChatGPT recusou o anexo da imagem (Upload failed). Nenhuma edição foi enviada nem publicada. Verifique a conversa vinculada antes de tentar novamente.'
+      : 'a imagem não carregou'},
   };
 }
 

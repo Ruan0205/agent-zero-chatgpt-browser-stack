@@ -14,11 +14,17 @@ export default async function queueGuard(ctx) {
   if (!(await modelGateStore.canSendToModel())) return; // Keep original model setup gate.
   const draft = inputStore.message;
   ctx.cancel = true; // This extension owns exactly one confirmed submission.
-  const previous = submissions.get(ctx.context) || Promise.resolve();
+  const signature=JSON.stringify([ctx.message,(ctx.attachments||[]).map(a=>[a.serverPath||a.name||a.file?.name,a.file?.size])]);
+  const pending=submissions.get(ctx.context);
+  // A double click/Enter while the same draft is still being submitted is one
+  // action. Distinct messages retain their intentional order in the queue.
+  if(pending?.signature===signature){await pending.promise;return;}
+  const previous = pending?.promise || Promise.resolve();
   const operation = previous.catch(()=>{}).then(()=>submit(ctx,draft));
-  submissions.set(ctx.context,operation);
+  const submission={signature,promise:operation};
+  submissions.set(ctx.context,submission);
   try { await operation; }
-  finally { if (submissions.get(ctx.context) === operation) submissions.delete(ctx.context); }
+  finally { if (submissions.get(ctx.context) === submission) submissions.delete(ctx.context); }
 }
 
 async function submit(ctx,draft) {

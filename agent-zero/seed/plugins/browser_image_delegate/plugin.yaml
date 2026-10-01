@@ -1,0 +1,5 @@
+name: browser_image_delegate
+title: Imagens via ChatGPT Browser
+description: Delegates native image generation and editing to a chat-owned Browser subagent and publishes verified files in the parent chat.
+version: 1.0.0
+always_enabled: true

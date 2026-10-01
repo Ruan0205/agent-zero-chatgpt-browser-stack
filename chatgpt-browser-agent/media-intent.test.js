@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { isInfrastructureWorkflow, isNativeMediaText } = require('./media-intent');
+const { isInfrastructureWorkflow, isNativeMediaText, isNativeVisualGenerationRequest } = require('./media-intent');
 const ext = '(?:png|jpe?g|webp|gif|pdf|zip|txt)';
 
 test('long infrastructure prompt with negative image instructions stays in Agent Zero', () => {
@@ -29,4 +29,12 @@ test('workspace work and negated creation use Agent Zero tools', () => {
     'Não crie uma imagem; compare a screenshot e faça as correções no código.',
     'Use o VS Code para editar README.md e depois publique o arquivo.',
   ]) assert.equal(isNativeMediaText(prompt, ext), false, prompt);
+});
+
+test('brand-new image requests are separated from editing requests', () => {
+  assert.equal(isNativeVisualGenerationRequest('Gere uma imagem NOVA de um cubo azul.'), true);
+  assert.equal(isNativeVisualGenerationRequest('Create an original image of a blue cube.'), true);
+  assert.equal(isNativeVisualGenerationRequest('Desenhe uma imagem nova de um círculo vermelho.'), true);
+  assert.equal(isNativeVisualGenerationRequest('Crie do zero uma imagem original de uma estrela roxa.\n' + 'Orientação de ferramentas. '.repeat(60) + 'exemplo.png'), true);
+  assert.equal(isNativeVisualGenerationRequest('Edite esta imagem para deixar o cubo azul.'), false);
 });

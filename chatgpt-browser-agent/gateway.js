@@ -12,7 +12,7 @@ const { ProviderCooldown } = require('./provider-cooldown');
 const { isProviderMessageLimit, retryProviderRejection } = require('./retry-policy');
 const { compactUtilityBody } = require('./utility-compactor');
 const { isImageUploadTimeout, imageUploadFailureAnswer, failedUploadChatUrl, uploadedAttachmentsForTurn, isSameActiveRequest } = require('./image-upload');
-const { isNativeMediaText } = require('./media-intent');
+const { isNativeMediaText, isNativeVisualImageRequest, isNativeVisualGenerationRequest } = require('./media-intent');
 const { planMultipartPrompt } = require('./multipart-prompt');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8000);
@@ -83,7 +83,13 @@ function saveJsonFile(file,value) {
 }
 
 function loadChatMap() {
-  return loadJsonFile(CHATMAP_FILE,{});
+  try { return JSON.parse(fs.readFileSync(CHATMAP_FILE,'utf8')); }
+  catch(error) {
+    if(error?.code==='ENOENT') return {};
+    // A map exists but is unreadable or corrupt. Treating it as empty would
+    // silently create a different ChatGPT conversation for existing A0 chats.
+    throw new Error(`Chat map unreadable; refusing to rebind conversations: ${error.message}`);
+  }
 }
 
 function saveChatMap(map) {
@@ -367,6 +373,8 @@ function isMediaToolFollowup(body) {
 function nativeMediaPrompt(body) {
   const users=(body.messages||[]).filter(m=>m.role==='user' && bridge.isCurrentUserMessage(m));
   const text=users.length ? bridge.extractedUserText(bridge.textContent(users.at(-1).content)) : '';
+  if(isNativeVisualGenerationRequest(text)) return `Create a brand-new image from scratch with ChatGPT's native image generator. This is a text-to-image request with no input asset. Render the requested image in this SAME assistant turn. Do not use Meta AI, Python drawings, SVG, HTML, a placeholder, or a file card. Do not invent a sandbox:/mnt/data link or claim a file was saved. Wait until the image itself is visibly ready; then add one short completion sentence. If creation fails, state the actual error without claiming success.\n\nIMAGE TO CREATE:\n${text}`;
+  if(isNativeVisualImageRequest(text)) return `Handle the following request with ChatGPT's NATIVE image generation or image editing. Never use Meta AI, Python drawings, SVG, HTML or a placeholder. If an input image exists it is uploaded with this request. Preserve the requested composition and number of images. Let the actual generated/edited image appear in this SAME assistant turn. Do not invent a sandbox:/mnt/data link, do not claim a file was saved, and do not replace the image with a file card. After the image is visibly ready, add one short completion sentence. If native generation fails, explain the failure rather than claiming success.\n\nUSER REQUEST:\n${text}`;
   return `Handle the following latest Agent Zero user request directly. You may use ChatGPT's native image/file analysis, image generation, or image editing as appropriate. Never use Meta AI. Any user attachments are uploaded with this prompt. Preserve the user's exact requested content and number of outputs. Save every requested output under /mnt/data using the exact requested filename. Your final response MUST expose every output as a real clickable Markdown sandbox link in the form [Download filename](sandbox:/mnt/data/filename); a plain /mnt/data path, a citation without a download link, source code, or a claim that the file was attached is not sufficient. After those clickable links, add only one short completion sentence.\n\nUSER REQUEST:\n${text}`;
 }
 
@@ -405,6 +413,8 @@ async function runBrowser(slot, prompt, chatUrl, options={}) {
         CHATGPT_BROWSER_OUTBOX_DIR: path.join(STATE_DIR, 'outbox'),
         BROWSER_RECOVERY_RELOAD: options.reloadBeforeAttempt ? '1' : '0',
         BROWSER_REQUEST_TIMEOUT_MS: String(timeoutMs),
+        BROWSER_NATIVE_VISUAL: options.nativeVisual ? '1' : '0',
+        BROWSER_NATIVE_VISUAL_EDIT_LAST: options.nativeVisualEditLast ? '1' : '0',
         BROWSER_EXPECTED_ARTIFACT: options.expectedArtifact || '',
         A0_CONTEXT_ID: options.contextId || '',
       },
@@ -720,6 +730,8 @@ const server = http.createServer(async (req, res) => {
         const latestActualUserIndex=requestMessages.findLastIndex(message=>message.role==='user' && bridge.isCurrentUserMessage(message));
         const latestActualUser=latestActualUserIndex>=0 ? requestMessages[latestActualUserIndex] : null;
         const latestUserText=latestActualUser ? bridge.extractedUserText(bridge.textContent(latestActualUser.content)) : '';
+        const nativeVisual=nativeMedia && isNativeVisualImageRequest(latestUserText);
+        const nativeVisualEditLast=nativeVisual && latestUserText.includes('[A0_NATIVE_VISUAL_EDIT_LAST]');
         prompt=nativeMedia ? nativeMediaPrompt(body) : bridge.buildPrompt(requestBody,MAX_PROMPT_CHARS,utilityCall ? null : (chatHash ? known : null),utilityCall ? null : transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY,callScope,preserveUtilityContext:UTILITY_SINGLE_CHAT,activeUserText:latestUserText});
         const allAttachmentRefs=/^main(?:[:]|$)/i.test(callScope) ? bridge.attachmentInputs(body,transportState,{browserOwnsHistory:BROWSER_OWNS_HISTORY}) : [];
         const attachmentTurnId=bridge.attachmentTurnIdentity(body);
@@ -777,6 +789,8 @@ const server = http.createServer(async (req, res) => {
             deadline:requestDeadline,
             uploadPaths:reloadBeforeAttempt?[]:browserUploadPaths,
             expectedArtifact:nativeMedia?'':expectedArtifact,
+            nativeVisual,
+            nativeVisualEditLast,
             contextId,
           });
           if(multipartPrompt!==promptToSend) {multipartPrompt=promptToSend;multipartProgress=0;}
@@ -792,6 +806,8 @@ const server = http.createServer(async (req, res) => {
               deadline:requestDeadline,
               uploadPaths:final?browserUploadPaths:[],
               expectedArtifact:final && !nativeMedia?expectedArtifact:'',
+              nativeVisual:final && nativeVisual,
+              nativeVisualEditLast:final && nativeVisualEditLast,
               contextId,
             });
             bindReturnedUrl(result.chatUrl);
@@ -807,6 +823,17 @@ const server = http.createServer(async (req, res) => {
             browserResult=await runAttempt(rateAttempt>0 || emptyRetry>0);
             break;
           } catch(error) {
+            if(nativeVisual && /Timed out waiting for (?:ChatGPT to (?:start responding|publish its assistant turn)|final response)|ChatGPT browser request timed out/i.test(error.message)) {
+              const submittedUrl=chatUrl||requestChatUrlFromError(error);
+              if(submittedUrl) bindReturnedUrl(submittedUrl);
+              console.warn('[native-image] Submitted turn timed out without conclusive completion; refusing to submit it again');
+              return JSON.stringify({
+                thoughts:['A mensagem foi enviada, mas a geração/edição no navegador não concluiu dentro do prazo. O estado é inconclusivo; não houve reenvio.'],
+                headline:'Imagem ainda sem conclusão confirmada',
+                tool_name:'response',
+                tool_args:{text:'A solicitação de imagem foi enviada ao navegador, mas sua conclusão não foi confirmada. Ela NÃO foi reenviada. Verifique a conversa vinculada antes de fazer uma nova solicitação.'},
+              });
+            }
             if(isImageUploadTimeout(error)) {
               // A failed first upload never created a ChatGPT turn. The
               // slot's global session pointer may belong to another Agent
@@ -826,7 +853,7 @@ const server = http.createServer(async (req, res) => {
                   saveJsonFile(stateFile,next);
                 }
               }
-              return JSON.stringify(imageUploadFailureAnswer());
+              return JSON.stringify(imageUploadFailureAnswer(error));
             }
             if(/ChatGPT completed an empty assistant turn/i.test(error.message)
               && emptyRetry<1 && !nativeMedia && browserUploadPaths.length===0
@@ -881,6 +908,16 @@ const server = http.createServer(async (req, res) => {
         let raw=browserResult.raw;
         let artifacts=browserResult.artifacts||[];
         if(nativeMedia && !artifacts.length) {
+          if(nativeVisual) {
+            remember();
+            console.warn('[native-image] Completed turn had no retrievable image; returning controlled failure without resubmission');
+            return JSON.stringify({
+              thoughts:['A geração/edição foi solicitada ao navegador, mas nenhum arquivo de imagem verificável foi recuperado.'],
+              headline:'Imagem não recuperada',
+              tool_name:'response',
+              tool_args:{text:'O navegador terminou sem fornecer uma imagem que a ponte pudesse verificar e publicar. Nenhuma imagem foi entregue e a solicitação não foi reenviada automaticamente.'},
+            });
+          }
           const createdPath=(raw.match(/\/mnt\/data\/[^\s)\]>'"]+/)||[])[0]||'';
           const exposePrompt=createdPath
             ? `The file already exists at ${createdPath}. Do not recreate or modify it. Return a real clickable Markdown download link exactly in this form: [Download ${createdPath.split('/').pop()}](sandbox:${createdPath}). Then add one short completion sentence.`
@@ -898,8 +935,30 @@ const server = http.createServer(async (req, res) => {
           if(artifacts.length && /^main(?:[:]|$)/i.test(callScope)) { remember(); return mediaEnvelope('',raw,artifacts); }
           console.warn('Response format retry:', error.message);
           if(remainingBudget()<=5_000) throw new Error('Browser request exhausted its safety budget before format recovery');
-          const retry = await runBrowser(slot,prompt+'\n\nYour previous attempt had this format error: '+error.message+'. Generate the next response again as valid JSON, preserving the latest user task.', chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:nativeMedia?'':expectedArtifact});
-          const result=bridge.validateAnswer(retry.raw, requestBody,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
+          // The multipart transcript is already in this exact browser chat.
+          // Replaying the entire prompt here duplicates every context part and
+          // can trigger another timeout or a response to the wrong turn.
+          const missingToolAttempt=/\b(?:browser action requested|operational .*requires|tool .*not attempted)\b/i.test(error.message);
+          const formatRecoveryPrompt=missingToolAttempt
+            ? `Your immediately preceding answer was rejected because it ended the Agent Zero task before a required real tool call: ${error.message}. The Agent Zero tool bridge IS connected. You are only composing the JSON tool request; Agent Zero executes it after your response and returns its actual result. Do not claim there is no terminal in this browser. Return ONE complete fenced JSON object with a concrete first tool call, normally tool_name "code_execution_tool" and tool_args {"runtime":"terminal","session":0,"code":"<short read-only environment check>"}, or the relevant required tool. Do not claim the project was completed or return tool_name "response" yet.`
+            : `Your immediately preceding response did not satisfy the Agent Zero JSON protocol: ${error.message}. Do not repeat the user task or execute a tool again. Reformulate only that same completed response as one complete Agent Zero JSON object inside one fenced json code block. Preserve any actual tool result already given; do not invent one.`;
+          const retry = await runBrowser(slot,formatRecoveryPrompt, chatUrl,{timeoutMs:remainingBudget(),uploadPaths:[],expectedArtifact:nativeMedia?'':expectedArtifact});
+          try {
+            const result=bridge.validateAnswer(retry.raw, requestBody,{callScope}); remember(); return mediaEnvelope(result,retry.raw,retry.artifacts||[]);
+          } catch(formatError) {
+            // Both assistant turns completed in this mapped browser chat. Keep
+            // its delivered transcript as browser-owned history; otherwise
+            // Agent Zero's own retry replays all multipart stages and may
+            // execute the user's request twice.
+            remember();
+            console.error(`[format-recovery] completed browser response remains invalid: ${formatError.message}`);
+            return JSON.stringify({
+              thoughts:['O navegador concluiu a resposta, mas ela não seguiu o formato de ferramenta do Agent Zero após uma correção curta. Nenhuma nova tentativa foi enviada.'],
+              headline:'Resposta do navegador incompatível',
+              tool_name:'response',
+              tool_args:{text:'O ChatGPT respondeu no navegador, mas a resposta não pôde ser interpretada pelo Agent Zero. A conversa foi preservada no mesmo navegador; reformule o pedido ou verifique a VNC antes de continuar.'},
+            });
+          }
         }
       });
       if(streamHeartbeat) { clearInterval(streamHeartbeat); streamHeartbeat=null; }
@@ -946,6 +1005,31 @@ const server = http.createServer(async (req, res) => {
       }
       if (/INLINE_JSON_PAYLOAD_TOO_LARGE/.test(error.message)) {
         return json(res, 413, {error:{message:error.message,type:'invalid_request_error',code:'inline_payload_too_large'}});
+      }
+      if(/^main(?:[:]|$)/i.test(requestCallScope)
+        && /Timed out waiting for ChatGPT to (?:start responding|publish its assistant turn)/i.test(error.message)) {
+        // Submission was confirmed, but the provider did not publish an
+        // assistant turn. This is inconclusive, not a failed submission.
+        // A 502 makes Agent Zero submit the same prompt several more times.
+        // Stop that loop and preserve the mapped browser chat for inspection.
+        const controlled=JSON.stringify({
+          thoughts:['A mensagem foi enviada ao chat correto no navegador, mas o ChatGPT não publicou uma resposta até o prazo de observação. Não reenviei automaticamente para evitar duplicação.'],
+          headline:'Aguardando resposta do navegador',
+          tool_name:'response',
+          tool_args:{text:'O ChatGPT ainda não publicou uma resposta para a mensagem já enviada. Não reenviei o pedido para evitar duplicação. Verifique a VNC deste chat e tente continuar depois que a resposta aparecer.'},
+        });
+        markRequest(requestChatHash,'error','ChatGPT sem novo turno do assistente após envio confirmado; reenvio automático bloqueado');
+        return json(res,200,openAiResponse(controlled,prompt||''));
+      }
+      if(/^main(?:[:]|$)/i.test(requestCallScope)
+        && /ChatGPT rejected the request:.*(?:Something went wrong\. Please try again|Algo deu errado\. Tente novamente)/i.test(error.message)) {
+        const controlled=JSON.stringify({
+          thoughts:['O próprio ChatGPT exibiu uma falha de geração após o envio confirmado. Não é seguro repetir a solicitação automaticamente, pois o chat pode retomá-la depois.'],
+          headline:'Falha temporária no ChatGPT',
+          tool_name:'response',
+          tool_args:{text:'O ChatGPT exibiu “Something went wrong. Please try again” no navegador. A mensagem já foi enviada e não foi duplicada. Verifique a VNC e tente continuar quando o provedor voltar a responder.'},
+        });
+        return json(res,200,openAiResponse(controlled,prompt||''));
       }
       return json(res, 502, {error:{message:error.message, type:'browser_agent_error'}});
     }

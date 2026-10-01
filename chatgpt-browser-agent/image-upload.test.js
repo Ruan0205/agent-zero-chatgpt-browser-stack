@@ -25,9 +25,11 @@ test('all image previews must finish before a multi-image request is sent',()=>{
 
 test('upload timeout becomes a final Agent Zero response, not a retried tool call',()=>{
   assert.equal(isImageUploadTimeout(new Error('[ERROR] IMAGE_UPLOAD_TIMEOUT: a imagem não carregou')),true);
+  assert.equal(isImageUploadTimeout(new Error('IMAGE_UPLOAD_FAILED: Upload failed')),true);
   assert.equal(isImageUploadTimeout(new Error('Prompt submission was not acknowledged')),false);
   assert.deepEqual(imageUploadFailureAnswer().tool_args,{text:'a imagem não carregou'});
   assert.equal(imageUploadFailureAnswer().tool_name,'response');
+  assert.match(imageUploadFailureAnswer(new Error('IMAGE_UPLOAD_FAILED: Upload failed')).tool_args.text,/Nenhuma edição foi enviada/);
 });
 
 test('failed first upload never inherits another conversation from the browser slot',()=>{

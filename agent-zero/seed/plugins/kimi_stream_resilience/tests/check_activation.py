@@ -10,11 +10,13 @@ from usr.plugins.kimi_stream_resilience.resilience import KimiRetriesExhausted
 
 classes = _get_extension_classes("chat_model_call_before")
 active = any(cls.__name__ == "AtomicKimiTurn" for cls in classes)
+native = any(cls.__name__ == "NativeKimiTools" for cls in classes)
 print("KIMI_EXTENSION_DISCOVERED=" + str(active))
+print("KIMI_NATIVE_TOOLS_DISCOVERED=" + str(native))
 handlers = _get_extension_classes("_functions/agent/Agent/handle_exception/end")
 handled = any(cls.__name__ == "HandleKimiExhaustion" for cls in handlers)
 print("KIMI_ERROR_HANDLER_DISCOVERED=" + str(handled))
-if not active or not handled:
+if not active or not native or not handled:
     raise SystemExit(1)
 
 # The bounded provider retry must not cascade into the generic whole-turn

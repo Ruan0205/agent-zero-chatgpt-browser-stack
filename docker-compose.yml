@@ -3,13 +3,13 @@ name: agent-zero-browser-stack
 services:
   bootstrap:
     build: ./bootstrap
-    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.16}
+    image: agent-zero-browser-stack-bootstrap:${STACK_SCHEMA_VERSION:-v2.12-stack.17}
     container_name: agent-zero-bootstrap
     restart: "no"
     environment:
       VNC_PASSWORD: ${VNC_PASSWORD:?configure VNC_PASSWORD in .env}
       CHATGPT_VNC_PORT: ${CHATGPT_VNC_PORT:-50081}
-      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.16}
+      STACK_SCHEMA_VERSION: ${STACK_SCHEMA_VERSION:-v2.12-stack.17}
     volumes:
       - ./scripts/bootstrap.sh:/bootstrap.sh:ro
       - ./scripts/migrate_persistent_state.py:/migrate_persistent_state.py:ro
@@ -251,6 +251,7 @@ services:
       - ./:/repair-repo:rw
       - ./agent-zero/repair-guard-plugin:/a0/plugins/_repair_guard:ro
       - ./agent-zero/seed/plugins/kimi_stream_resilience:/a0/usr/plugins/kimi_stream_resilience:ro
+      - ./agent-zero/seed/plugins/browser_image_delegate:/a0/usr/plugins/browser_image_delegate:ro
       - ./agent-zero/seed/plugins/visual_evidence_guard:/a0/usr/plugins/visual_evidence_guard:ro
       - ./agent-zero/seed/plugins/memory_delete_guard:/a0/usr/plugins/memory_delete_guard:ro
       - ./agent-zero/seed/plugins/message_queue_guard:/a0/usr/plugins/message_queue_guard:ro
@@ -379,6 +380,7 @@ services:
       - ./agent-zero/chat-usage-plugin:/a0/plugins/_chat_usage:ro
       - ./agent-zero/chatgpt-browser-media-plugin:/a0/plugins/_chatgpt_browser_media:ro
       - ./agent-zero/seed/plugins/kimi_stream_resilience:/a0/usr/plugins/kimi_stream_resilience:ro
+      - ./agent-zero/seed/plugins/browser_image_delegate:/a0/usr/plugins/browser_image_delegate:ro
       - ./agent-zero/seed/plugins/visual_evidence_guard:/a0/usr/plugins/visual_evidence_guard:ro
       - ./agent-zero/seed/plugins/memory_delete_guard:/a0/usr/plugins/memory_delete_guard:ro
       - ./agent-zero/seed/plugins/message_queue_guard:/a0/usr/plugins/message_queue_guard:ro

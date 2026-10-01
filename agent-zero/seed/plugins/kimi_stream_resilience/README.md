@@ -1,5 +1,13 @@
 # Kimi response resilience
 
+Kimi Chat Completions now receives Agent Zero's actual per-turn authorized
+function inventory as OpenAI-compatible `tools`, with `tool_choice=required`.
+The inventory is converted from the framework's existing Responses descriptors,
+so custom and MCP tools retain their names, descriptions, schemas and policy
+filters. The Browser model is untouched. Native calls still pass through Agent
+Zero's standard approval and execution guards. Legacy textual DSML/JSON repair
+remains only as a defensive compatibility path, not the primary protocol.
+
 This user plugin applies only to `kimi-k3`. It requests each model turn as a complete, non-streaming response so an interrupted provider stream cannot leave Agent Zero with a partial tool call. Transient connection, incomplete-response, empty-response, timeout, 5xx, and rate-limit failures retry the **model request only**, at most four calls total. Rate-limit backoff starts at 30 seconds. Permanent authentication and other 4xx errors are not retried.
 
 After exhaustion the plugin reports one controlled error and prevents Agent Zero's generic whole-turn retry from replaying earlier actions. It does not alter the `chatgpt-browser` model or automatically resume a user chat. The trade-off is that Kimi's response appears only when its full model request completes; Agent Zero's calling indicator remains visible meanwhile.

@@ -51,7 +51,7 @@ copy_once "$seed_root/settings.json" "$data_root/agent-zero-repair/settings.json
 repair_prompt="$data_root/agent-zero-repair/agents/agent0/prompts/agent.system.main.specifics.md"
 repair_seed="$seed_root/agents/agent0/prompts/agent.system.main.repair.md"
 if [ -f "$repair_prompt" ] && ! cmp -s "$repair_seed" "$repair_prompt"; then
-  repair_backup="$data_root/.stack-backups/${STACK_SCHEMA_VERSION:-v2.12-stack.16}/repair-prompt"
+  repair_backup="$data_root/.stack-backups/${STACK_SCHEMA_VERSION:-v2.12-stack.17}/repair-prompt"
   mkdir -p "$repair_backup"
   cp "$repair_prompt" "$repair_backup/agent.system.main.specifics.md"
 fi
@@ -65,8 +65,16 @@ for profile in default developer hacker researcher tiny-local; do
   copy_once "$seed_root/agents/$profile/agent.yaml" "$data_root/agent-zero/agents/$profile/agent.yaml"
 done
 copy_once "$seed_root/agents/agent0/prompts/agent.system.main.specifics.md" "$data_root/agent-zero/agents/agent0/prompts/agent.system.main.specifics.md"
+for instance in agent-zero agent-zero-repair; do
+  for prompt in fw.topic_summary.sys.md compact.sys.md compact.msg.md; do
+    copy_once "$seed_root/agents/agent0/prompts/$prompt" "$data_root/$instance/agents/agent0/prompts/$prompt"
+  done
+done
 copy_once "$seed_root/agents/agent0/prompts/agent.system.tool.tasks.md" "$data_root/agent-zero/agents/agent0/prompts/agent.system.tool.tasks.md"
 copy_once "$seed_root/agents/agent0/tools/tasks.py" "$data_root/agent-zero/agents/agent0/tools/tasks.py"
+for instance in agent-zero agent-zero-repair; do
+  copy_once "$seed_root/agents/agent0/tools/search_engine.py" "$data_root/$instance/agents/agent0/tools/search_engine.py"
+done
 for tool in job_status browser_bridge_status artifact_verify server_diagnostics project_check; do
   copy_once "$seed_root/agents/agent0/tools/$tool.py" "$data_root/agent-zero/agents/agent0/tools/$tool.py"
   copy_once "$seed_root/agents/agent0/prompts/agent.system.tool.$tool.md" "$data_root/agent-zero/agents/agent0/prompts/agent.system.tool.$tool.md"
@@ -77,6 +85,7 @@ copy_once "$seed_root/plugins/_code_execution/config.json" "$data_root/agent-zer
 for instance in agent-zero agent-zero-repair; do
   copy_once "$seed_root/plugins/visual_evidence_guard" "$data_root/$instance/plugins/visual_evidence_guard"
   copy_once "$seed_root/plugins/kimi_stream_resilience" "$data_root/$instance/plugins/kimi_stream_resilience"
+  copy_once "$seed_root/plugins/browser_image_delegate" "$data_root/$instance/plugins/browser_image_delegate"
   copy_once "$seed_root/plugins/message_queue_guard" "$data_root/$instance/plugins/message_queue_guard"
   copy_once "$seed_root/plugins/memory_delete_guard" "$data_root/$instance/plugins/memory_delete_guard"
 done

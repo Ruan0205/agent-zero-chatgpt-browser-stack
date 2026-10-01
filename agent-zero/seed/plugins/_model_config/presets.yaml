@@ -43,10 +43,10 @@
   chat:
     provider: other
     name: kimi-k3
-    api_base: http://agent-zero-featherless-queue:8000/v1
+    api_base: https://api5.we64.com/v1
     kwargs:
       temperature: 0.4
-      timeout: 21600
+      timeout: 1200
     ctx_length: 1000000
     ctx_history: 0.9
     vision: true
@@ -57,10 +57,10 @@
   utility:
     provider: other
     name: kimi-k3
-    api_base: http://agent-zero-featherless-queue:8000/v1
+    api_base: https://api5.we64.com/v1
     kwargs:
       temperature: 0.3
-      timeout: 21600
+      timeout: 1200
     ctx_length: 1000000
     ctx_input: 0.9
     rl_requests: 0

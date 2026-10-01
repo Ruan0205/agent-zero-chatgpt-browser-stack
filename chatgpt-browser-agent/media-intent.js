@@ -17,17 +17,36 @@ function isNativeMediaText(source, extensionPattern) {
   );
   if(isInfrastructureWorkflow(text) || /\b[A-Za-z0-9._-]+\.(?:feather|iso)\b/i.test(text)) return false;
   const programmingWorkflow=/\b(?:vs\s*code|vscode|workspace|text_editor|terminal|dockerfile|docker\s+compose|compose\.ya?ml|git|commit|projeto|project|c[oó]digo|codebase|aplica(?:ção|cao)|application)\b/i.test(text);
-  const explicitVisualMedia=/\b(?:gere|gerar|crie|criar|edite|editar|modifique|produza|generate|create|edit|modify|produce)\b[^.!?\n]{0,140}\b(?:imagem|imagens|foto|fotos|ilustra(?:ção|cao|ções|coes)|image|images|picture|pictures)\b/i.test(text);
+  const explicitVisualMedia=/\b(?:gere|gerar|crie|criar|desenhe|desenhar|edite|editar|modifique|produza|generate|create|draw|edit|modify|produce)\b[^.!?\n]{0,140}\b(?:imagem|imagens|foto|fotos|ilustra(?:ção|cao|ções|coes)|image|images|picture|pictures)\b/i.test(text);
   const explicitAttachmentDelivery=/\b(?:anexe|anexo|attachment|baix[aá]vel|downloadable|download|entregue\s+(?:o\s+)?arquivo|retorne\s+(?:o\s+)?arquivo|attach)\b/i.test(text);
   // A workspace/editor task must reach Agent Zero's tools even if it later
   // asks to publish the file. The native media path would skip verification.
   if(/\b(?:workspace|text_editor|vs\s*code|vscode)\b/i.test(text) && !explicitVisualMedia) return false;
   if(programmingWorkflow && !explicitVisualMedia && !explicitAttachmentDelivery) return false;
   const media='(?:imagem|imagens|foto|fotos|ilustra(?:ção|cao|ções|coes)|image|images|picture|pictures|pdf|zip|arquivo|file)';
-  const explicitAction=new RegExp(`\\b(?:gere|gerar|crie|criar|edite|editar|modifique|produza|generate|create|edit|modify|produce)\\b[^.!?\\n]{0,140}\\b${media}\\b`,'i');
+  const explicitAction=new RegExp(`\\b(?:gere|gerar|crie|criar|desenhe|desenhar|edite|editar|modifique|produza|generate|create|draw|edit|modify|produce)\\b[^.!?\\n]{0,140}\\b${media}\\b`,'i');
   const directMake=new RegExp(`\\b(?:faça|faca)\\b\\s+(?:(?:para\\s+mim)\\s+)?(?:(?:uma?|o|a|duas?|dois|esta?|esse?|essa?)\\s+){0,2}\\b${media}\\b`,'i');
   const explicitFilenameGeneration=new RegExp(`\\b(?:gere|gerar|crie|criar|produza|recrie|regenere|generate|create|produce|recreate|regenerate)\\b[^.!?\\n]{0,180}\\b[\\w.-]+\\.${extensionPattern}\\b`,'i');
   return text.split(/(?:[.!?]+\s+|\n+)/).some(clause=>explicitAction.test(clause)||directMake.test(clause)||explicitFilenameGeneration.test(clause));
 }
 
-module.exports = { isInfrastructureWorkflow, isNativeMediaText };
+// Native visual generation should leave its actual image in the ChatGPT turn.
+// The sandbox:/mnt/data contract is for created *files*, not image-generator
+// cards, which can have no backing /mnt/data file at all.
+function isNativeVisualImageRequest(source) {
+  // The Agent Zero current-user envelope can append thousands of characters
+  // of tool guidance, including example .png filenames. Classify the actual
+  // request at its beginning rather than letting those examples veto it.
+  const text=String(source||'').slice(0,800);
+  if(/\b[\w.-]+\.(?:png|jpe?g|webp|gif)\b/i.test(text)) return false;
+  return /\b(?:imagem|imagens|foto|fotos|ilustra(?:ção|cao|ções|coes)|image|images|picture|pictures)\b/i.test(text)
+    && /\b(?:crie|criar|gere|gerar|desenhe|desenhar|edite|editar|modifique|faça|faca|create|generate|draw|edit|modify|produce)\b/i.test(text);
+}
+
+function isNativeVisualGenerationRequest(source) {
+  const text=String(source||'').slice(0,800);
+  return isNativeVisualImageRequest(text)
+    && /\b(?:crie|criar|gere|gerar|desenhe|desenhar|create|generate|draw)\b[^.!?\n]{0,160}\b(?:imagem|imagens|foto|fotos|ilustra(?:ção|cao|ções|coes)|image|images|picture|pictures)\b/i.test(text);
+}
+
+module.exports = { isInfrastructureWorkflow, isNativeMediaText, isNativeVisualImageRequest, isNativeVisualGenerationRequest };

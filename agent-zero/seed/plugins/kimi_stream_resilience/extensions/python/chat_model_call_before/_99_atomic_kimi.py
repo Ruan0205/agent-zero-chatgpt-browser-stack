@@ -1,7 +1,7 @@
 """Use an atomic, retryable turn for the Kimi provider only."""
 
 from helpers.extension import Extension
-from usr.plugins.kimi_stream_resilience.resilience import KimiRetryModel, is_kimi
+from usr.plugins.kimi_stream_resilience.resilience import EmptyModelResponse, NonNativeModelResponse, KimiRetryModel, is_kimi
 
 
 class AtomicKimiTurn(Extension):
@@ -19,7 +19,9 @@ class AtomicKimiTurn(Extension):
                 heading="Kimi: resposta incompleta, tentando novamente",
                 content=(
                     f"Tentativa {attempt} de 3; aguardando {delay}s. "
-                    f"Tipo: {type(error).__name__}. Nenhuma ferramenta foi executada."
+                    f"Tipo: {type(error).__name__}. "
+                    f"{str(error) if isinstance(error, (EmptyModelResponse, NonNativeModelResponse)) else ''} "
+                    "Nenhuma ferramenta foi executada."
                 ),
             )
 

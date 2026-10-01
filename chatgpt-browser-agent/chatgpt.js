@@ -31,7 +31,7 @@ const crypto              = require('crypto');
 const readline            = require('readline');
 const { execSync, spawn } = require('child_process');
 const { activeProviderRejection } = require('./provider-rejection');
-const { canCollectCompletedTurn, isDownloadTextCandidate, isCompletedEmptyTurn } = require('./completion-state');
+const { canCollectCompletedTurn, isDownloadTextCandidate, isCompletedEmptyTurn, isActiveProcessingState } = require('./completion-state');
 const { imageUploadCount, imageUploadReady, imageUploadTimeoutMs } = require('./image-upload');
 const { composerChunks, normalizeComposerText } = require('./composer-chunks');
 
@@ -212,11 +212,16 @@ async function imageComposerState(page) {
         return rect.width>0 && rect.height>0;
       });
     const button=document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
+    // A user may literally mention "Upload failed" in the prompt. Inspect
+    // status outside the editable draft so that text is not a false rejection.
+    const composerText=String(scope?.innerText||'').replace(String(editor?.innerText||''),'');
+    const failedMessage=/(?:Upload failed|Falha (?:no envio|ao carregar)|N[aã]o foi poss[ií]vel (?:enviar|carregar)(?: o arquivo)?)/i.exec(composerText)?.[0]||'';
     return {
       previewCount:previews.length,
       loadedCount:previews.filter(img=>img.complete && img.naturalWidth>0).length,
       pendingCount:pending.length,
       sendEnabled:Boolean(button && !button.disabled),
+      failedMessage,
     };
   });
 }
@@ -252,6 +257,12 @@ async function waitForImageUploads(page, count, contextId, deadline, log) {
     const rejection=await readProviderRejection(page);
     if(rejection) throw new Error(`ChatGPT rejected the image upload: ${rejection}`);
     lastState=await imageComposerState(page);
+    if(lastState.failedMessage) {
+      log(`Image upload rejected by composer: ${lastState.failedMessage}`);
+      await clearFailedImageUpload(page,log);
+      await notifyImageUpload(contextId,'image_upload_failed',log);
+      throw new Error(`IMAGE_UPLOAD_FAILED: ${lastState.failedMessage}`);
+    }
     stable=imageUploadReady(lastState,count) ? stable+1 : 0;
     if(stable>=2) {
       log(`Image preview ready: ${JSON.stringify(lastState)}`);
@@ -265,6 +276,106 @@ async function waitForImageUploads(page, count, contextId, deadline, log) {
   await clearFailedImageUpload(page,log);
   await notifyImageUpload(contextId,'image_upload_failed',log);
   throw new Error('IMAGE_UPLOAD_TIMEOUT: a imagem não carregou');
+}
+
+async function editLastNativeImage(page, prompt, deadline, log) {
+  const chatUrl=page.url().split('?')[0];
+  if(!/^https:\/\/chatgpt\.com\/c\/[a-zA-Z0-9-]+$/.test(chatUrl))
+    throw new Error('NATIVE_EDIT_REQUIRES_MAPPED_CHAT');
+  const requestKey=crypto.createHash('sha256').update(`${chatUrl}\n${prompt}`).digest('hex');
+  const statePath=path.join(STATE_DIR,`.native-edit-${requestKey}.json`);
+  const previewHash=()=>page.evaluate(async()=>{
+    const images=[...document.querySelectorAll(
+      '[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]'
+    )].filter(img=>img.complete && img.naturalWidth>=128 && img.naturalHeight>=128);
+    const source=images.at(-1)?.currentSrc||images.at(-1)?.src;
+    if(!source) return '';
+    try {
+      const bytes=await (await fetch(source,{credentials:'include'})).arrayBuffer();
+      const digest=await crypto.subtle.digest('SHA-256',bytes);
+      return [...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+    } catch { return ''; }
+  });
+  const saved=fs.existsSync(statePath)?JSON.parse(fs.readFileSync(statePath,'utf8')):null;
+  const originalHash=saved?.originalHash||await previewHash();
+  if(!originalHash) throw new Error('NATIVE_EDIT_SOURCE_NOT_VERIFIED');
+  const previousSources=await page.evaluate(()=>[...document.querySelectorAll(
+    '[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]'
+  )].map(img=>img.currentSrc||img.src).filter(Boolean));
+  if(!saved) {
+  const opened=await page.evaluate(()=>{
+    const previews=[...document.querySelectorAll(
+      '[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]'
+    )].filter(img=>img.complete && img.naturalWidth>=128 && img.naturalHeight>=128);
+    const image=previews.at(-1);
+    if(!image) return {ok:false,reason:'No verified native image preview in this conversation'};
+    image.scrollIntoView({block:'center'});
+    let node=image;
+    for(let depth=0;node && depth<8;depth++,node=node.parentElement) {
+      const button=[...node.querySelectorAll('button,[role="button"]')]
+        .find(item=>/^(?:Edit|Editar)$/i.test(String(item.innerText||item.getAttribute('aria-label')||'').trim()));
+      if(button) { button.click(); return {ok:true}; }
+    }
+    return {ok:false,reason:'Native image Edit control was not found'};
+  });
+  if(!opened.ok) throw new Error(`NATIVE_EDIT_UNAVAILABLE: ${opened.reason}`);
+  await page.waitForFunction(()=>
+    /\b(?:Remove BG|Remover fundo)\b/i.test(document.body.innerText)
+    && !!document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]'),
+    {timeout:15_000,polling:250});
+  await fillTextarea(page,prompt,log);
+  const inserted=await page.$eval('#prompt-textarea,[role="textbox"][contenteditable="true"]',
+    element=>element.value??element.innerText);
+  if(normalizeComposerText(inserted)!==normalizeComposerText(prompt))
+    throw new Error('NATIVE_EDIT_COMPOSER_MISMATCH');
+  await page.waitForFunction(()=>{
+    const button=document.querySelector('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
+    return button && !button.disabled;
+  },{timeout:15_000,polling:250});
+  await page.click('button[data-testid="send-button"],button[aria-label="Send"],button[aria-label="Enviar"]');
+  const acknowledged=await page.waitForFunction(()=>{
+    const editor=document.querySelector('#prompt-textarea,[role="textbox"][contenteditable="true"]');
+    return !String(editor?.value??editor?.innerText??'').trim();
+  },{timeout:15_000,polling:250}).then(()=>true).catch(()=>false);
+  if(!acknowledged) throw new Error('NATIVE_EDIT_SUBMISSION_NOT_ACKNOWLEDGED');
+  fs.writeFileSync(statePath,JSON.stringify({chatUrl,originalHash,submittedAt:Date.now()}),{mode:0o600});
+  log('Native image editor accepted the edit request; persisted submission marker');
+  } else {
+    log('Native image edit was already submitted; recovering result without resending');
+  }
+  let newHash='';
+  let stableSince=0;
+  let reloaded=false;
+  while(Date.now()<deadline-5_000) {
+    const currentHash=await previewHash();
+    const busy=await page.evaluate(()=>!!document.querySelector(
+      'button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]'
+    )).catch(()=>false);
+    if(currentHash && currentHash!==originalHash && !busy) {
+      if(currentHash!==newHash) {newHash=currentHash;stableSince=Date.now();}
+      if(Date.now()-stableSince>=15_000) break;
+    } else {newHash='';stableSince=0;}
+    if(!reloaded && Date.now()-Number(saved?.submittedAt||fs.statSync(statePath).mtimeMs)>90_000 && !busy) {
+      await page.reload({waitUntil:'domcontentloaded',timeout:30_000});
+      reloaded=true;
+    }
+    await new Promise(resolve=>setTimeout(resolve,1_000));
+  }
+  if(!newHash || Date.now()-stableSince<15_000)
+    throw new Error('NATIVE_EDIT_SUBMITTED_RESULT_PENDING: edit was sent; no second submission is allowed');
+  if(page.url().split('?')[0]!==chatUrl) throw new Error('Native edit left its mapped conversation');
+  const userTurnId=await page.evaluate(()=>[...document.querySelectorAll('[data-message-author-role="user"]')]
+    .at(-1)?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid')||null);
+  let artifacts=await collectAssistantArtifacts(page,log,null,userTurnId,true,reloaded?[]:previousSources);
+  if(!artifacts.some(item=>String(item.mime||'').startsWith('image/')) && !reloaded) {
+    await page.reload({waitUntil:'domcontentloaded',timeout:30_000});
+    await page.waitForSelector('[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]',{timeout:30_000});
+    artifacts=await collectAssistantArtifacts(page,log,null,userTurnId,true,[]);
+  }
+  if(!artifacts.some(item=>String(item.mime||'').startsWith('image/')))
+    throw new Error('NATIVE_EDIT_SUBMITTED_RESULT_PENDING: edited image not retrievable; no second submission is allowed');
+  log(`Native image edit published ${artifacts.length} artifact(s) in mapped conversation`);
+  return {response:'Imagem editada e arquivo real verificado.',artifacts,chatUrl};
 }
 
 async function streamBrowserArtifact(page, url, target) {
@@ -318,28 +429,38 @@ async function streamBrowserArtifact(page, url, target) {
   return {...metadata,bytes};
 }
 
-async function collectAssistantArtifacts(page, log, responseTurnId=null) {
+async function collectAssistantArtifacts(page, log, responseTurnId=null, submittedUserTurnId=null, nativeVisual=false, priorVisualSources=[]) {
   // Keep this list aligned with every artifact type the Agent Zero bridge is
   // expected to return. ChatGPT often renders generated files as buttons
   // whose only useful signal is the filename, rather than as normal links.
   const downloadableExtensionPattern='\\.(?:png|jpe?g|webp|gif|pdf|docx?|xlsx?|xls|pptx?|csv|tsv|txt|md|json|xml|ya?ml|html?|svg|py|js|ts|jsx|tsx|java|c|cpp|h|hpp|cs|go|rs|php|rb|sh|ps1|bat|sql|css|toml|ini|cfg|conf|log|ipynb|zip|7z|rar|tar|tar\\.gz|tgz|gz|bz2|xz|sqlite|db|parquet|feather|npy|npz|h5|hdf5|mat|stl|obj|ply|gltf|glb|dae|dxf|wav|mp3|flac|ogg|opus|aac|mp4|mov|mkv|avi|webm|iso|bin|exe|dll|so|apk|jar)\\b';
   const downloadDir=path.join(STATE_DIR,`downloads-${crypto.randomUUID()}`);
   fs.mkdirSync(downloadDir,{recursive:true,mode:0o700});
-  const candidates=await page.evaluate((targetTurnId) => {
+  const candidates=await page.evaluate((targetTurnId, submittedTurnId, visual, previousSources) => {
     const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]'));
     const assistant=[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);
     const root=(targetTurnId ? document.querySelector(`[data-testid="${CSS.escape(targetTurnId)}"]`) : null)
       || (!targetTurnId ? turns.at(-1) : null)
       || (!targetTurnId ? assistant?.closest('[data-testid^="conversation-turn-"]') : null)
       || (!targetTurnId ? assistant : null);
-    if(!root) return [];
+    if(!root && !visual) return [];
     const candidates=[];
     // File links use Chromium's disk-backed download below. Fetching an
     // archive into this page would allocate the entire file twice before the
     // provider's download control gets a chance to stream it to disk.
-    for(const img of root.querySelectorAll('img[src]')) {
+    let images=[...(root?.querySelectorAll('img[src]')||[])];
+    if(visual && submittedTurnId) {
+      // ChatGPT's native image card uses srcset/picture; the <img> itself may
+      // have no src attribute. The card also lives outside the assistant turn.
+      // Take the newest completed native preview for this completed response.
+      images=[...document.querySelectorAll('[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]')]
+        .filter(img=>img.complete && img.naturalWidth>=128 && img.naturalHeight>=128
+          && !previousSources.includes(img.currentSrc||img.src))
+        .slice(-1);
+    }
+    for(const img of images) {
       const r=img.getBoundingClientRect();
-      if((img.naturalWidth||r.width)<128 || (img.naturalHeight||r.height)<128) continue;
+      if(Math.max(img.naturalWidth||0,r.width)<128 || Math.max(img.naturalHeight||0,r.height)<128) continue;
       if(/avatar|profile|emoji|icon/i.test(`${img.alt||''} ${img.className||''}`)) continue;
       candidates.push({url:img.currentSrc||img.src,name:img.alt||''});
     }
@@ -349,7 +470,11 @@ async function collectAssistantArtifacts(page, log, responseTurnId=null) {
       seen.add(candidate.url);
       return true;
     });
-  },responseTurnId);
+  },responseTurnId,submittedUserTurnId,nativeVisual,priorVisualSources);
+  if(nativeVisual) {
+    log(`Native visual prior sources: ${priorVisualSources.length}; candidates: ${JSON.stringify(candidates.map(({url,name})=>({url:String(url).slice(0,180),name})))}`);
+    if(!candidates.length) log(`Native visual DOM previews: ${JSON.stringify(await page.evaluate(()=>[...document.querySelectorAll('[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]')].map(img=>({complete:img.complete,w:img.naturalWidth,h:img.naturalHeight,src:String(img.currentSrc||img.src||'').slice(0,180),srcset:String(img.srcset||'').slice(0,180)}))))}`);
+  }
   const found=[];
   for(const candidate of candidates) {
     const target=path.join(downloadDir,`image-${crypto.randomUUID()}`);
@@ -1102,7 +1227,7 @@ async function readProviderRejection(page) {
   return page.evaluate(activeProviderRejection).catch(()=> '');
 }
 
-async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, submittedUserTurnId=null) {
+async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, submittedUserTurnId=null, nativeVisual=false, priorVisualSources=[]) {
   // The previous assistant turn identity must be measured BEFORE submission.
   // A count is unsafe because ChatGPT virtualizes old turns and can keep the
   // count unchanged while replacing the visible DOM nodes.
@@ -1112,23 +1237,25 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         ?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null
     );
   }
-  log(`waitForStreamingDone: beforeTurnId=${beforeTurnId || '<none>'} submittedUserTurnId=${submittedUserTurnId || '<none>'}`);
+  log(`waitForStreamingDone: beforeTurnId=${beforeTurnId || '<none>'} submittedUserTurnId=${submittedUserTurnId || '<none>'} nativeVisual=${nativeVisual}`);
 
   // Phase 1 — wait for a new assistant turn, while recognizing provider-side
   // rejection banners immediately instead of converting them into a 5-minute
   // timeout.
   let responseTurnId = null;
   try {
-    const initialStartDeadline=Math.min(
-      requestDeadline,
-      Date.now()+RESPONSE_START_TIMEOUT
+    // The image generator can work for minutes before publishing any
+    // assistant node or exposing the ordinary text-streaming controls.
+    // A verified submitted image turn gets the request's full deadline.
+    const initialStartDeadline=nativeVisual ? requestDeadline : Math.min(
+      requestDeadline, Date.now()+RESPONSE_START_TIMEOUT
     );
     let activityObserved=false;
     let emptyCompletedSince=0;
     while(Date.now()<(activityObserved?requestDeadline:initialStartDeadline)) {
       const rejection=await readProviderRejection(page);
       if(rejection) throw new Error(`ChatGPT rejected the request: ${rejection}`);
-      const phase=await page.evaluate(({before,submittedUser}) => {
+      const phase=await page.evaluate(({before,submittedUser,visual,previousSources}) => {
         const turns=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')];
         const userIndex=submittedUser ? turns.findIndex(turn=>turn.getAttribute('data-testid')===submittedUser) : -1;
         const eligible=userIndex>=0 ? turns.slice(userIndex+1) : turns;
@@ -1148,15 +1275,21 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
           if(el.tagName==='IMG') return (el.naturalWidth||0)>=128 && (el.naturalHeight||0)>=128;
           return el.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(el.href||'');
         });
-        const started=!!turn && turn!==before && ((!progressOnly&&text)||media) ? {turn,text:(!progressOnly&&text)||'[media started]'} : null;
+        const newNativeImage=visual && [...document.querySelectorAll(
+          '[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]'
+        )].some(img=>img.complete && img.naturalWidth>=128 && img.naturalHeight>=128
+          && !previousSources.includes(img.currentSrc||img.src));
+        const started=!!turn && turn!==before && ((!progressOnly&&text)||media||newNativeImage)
+          ? {turn,text:(!progressOnly&&text)||'[media started]'}
+          : (newNativeImage ? {turn:'native-image-no-turn',text:'[native image started]'} : null);
         const busy=!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]');
         const completedEmpty=!!turn && turn!==before && !!currentAssistant
           && !text && !media && !busy
           && !!(latestTurn?.querySelector('button[data-testid="copy-turn-action-button"],button[aria-label="Copy"]')
             || latestTurn?.parentElement?.parentElement?.querySelector('button[aria-label="Copy"]'));
-        return {started,busy,completedEmpty};
-      },{before:beforeTurnId,submittedUser:submittedUserTurnId}).catch(()=>null);
-      if(phase?.busy&&!activityObserved) {
+        return {started,busy,thinking:!!turn && turn!==before && progressOnly,completedEmpty};
+      },{before:beforeTurnId,submittedUser:submittedUserTurnId,visual:nativeVisual,previousSources:priorVisualSources}).catch(()=>null);
+      if(isActiveProcessingState(phase)&&!activityObserved) {
         activityObserved=true;
         log('Visible ChatGPT processing detected before assistant turn; preserving the active generation until the request deadline');
       }
@@ -1212,13 +1345,14 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
   let mediaSince = 0;
   let stableDownloadText = '';
   let downloadTextSince = 0;
+  let visualCompleteSince = 0;
   const deadline = requestDeadline;
   while (stableCount < 3) {
     if (Date.now() > deadline) throw new Error('Timed out waiting for final response; partial text not returned');
     const rejection=await readProviderRejection(page);
     if(rejection) throw new Error(`ChatGPT rejected the request: ${rejection}`);
     await new Promise(r => setTimeout(r, 1000));
-    const state = await page.evaluate(expectedTurnId => {
+    const state = await page.evaluate((expectedTurnId, previousSources) => {
       const turn = [...document.querySelectorAll('[data-testid^="conversation-turn-"]')].filter(turn=>!turn.querySelector('[data-message-author-role="user"]')).at(-1);
       const turnId=turn?.getAttribute('data-testid') || null;
       const last = turn?.querySelector('[data-message-author-role="assistant"]');
@@ -1240,19 +1374,37 @@ async function waitForStreamingDone(page, log, beforeTurnId, requestDeadline, su
         if(el.tagName==='IMG') return (el.naturalWidth||0)>=128 && (el.naturalHeight||0)>=128 ? [`img:${el.currentSrc||el.src}:${el.naturalWidth}x${el.naturalHeight}`] : [];
         return el.hasAttribute('download') || /\/mnt\/data|oaiusercontent|download|files\//i.test(el.href||'') ? [`file:${el.href}`] : [];
       }).sort().join('|');
-      return {turnId,expectedTurnId,isExpected:turnId===expectedTurnId,text:last?.innerText || '',envelope,media,
+      const generatedImages=[...document.querySelectorAll('[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]')]
+        .filter(img=>img.complete && img.naturalWidth>=128 && img.naturalHeight>=128
+          && !previousSources.includes(img.currentSrc||img.src));
+      return {turnId,expectedTurnId,isExpected:turnId===expectedTurnId
+          || (expectedTurnId==='native-image-no-turn' && generatedImages.length>0),
+        text:last?.innerText || '',envelope,media,
+        generatedImageReady:generatedImages.length>0,
         hasCodeBlock:!!codes?.length,
         failed:!!turn?.querySelector('button[data-testid="regenerate-thread-error-button"]'),
         busy:!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]'),
         final:!!(turn?.querySelector('button[data-testid="copy-turn-action-button"],button[data-testid="good-response-turn-action-button"],button[data-testid="bad-response-turn-action-button"],button[aria-label="Copy"],button[aria-label="Rate response"]')
           || turn?.parentElement?.parentElement?.querySelector('button[aria-label="Copy"],button[aria-label="Rate response"]'))};
-    },responseTurnId);
+    },responseTurnId,priorVisualSources);
     if(!state.isExpected) continue;
     if(state.failed) throw new Error('ChatGPT rejected the request: '+state.text.slice(0,180));
     if (!state.busy && state.final && state.text && state.text === lastText) stableCount++;
     else stableCount = 0;
     if(Date.now()>deadline-1500) log(`final timeout state: ${JSON.stringify(state).slice(0,4000)}`);
     lastText = state.text;
+    // Native image generation can finish without ChatGPT rendering the usual
+    // Copy/Rate turn actions. Its explicit success text, tied to this turn,
+    // is sufficient after a long idle interval; generic text still requires
+    // positive final-action evidence below.
+    const visualSuccessText=/(?:imagem (?:criada|gerada|editada) com sucesso|image (?:created|generated|edited) successfully)/i.test(state.text||'');
+    if(nativeVisual && (state.generatedImageReady || visualSuccessText)) {
+      if(!visualCompleteSince) { visualCompleteSince=Date.now(); log(`Native visual completion observed: image=${state.generatedImageReady} text=${visualSuccessText}`); }
+      if(!state.busy && Date.now()-visualCompleteSince>=15_000) {
+        log('Native visual response stable and browser idle; collecting image');
+        return state.text || 'Imagem pronta.';
+      }
+    } else visualCompleteSince=0;
     // A fenced Agent Zero JSON tool call can contain installer URLs and the
     // word "Download" inside its code string. It is never a downloadable-file
     // answer. Let the envelope branch below return the verbatim code instead
@@ -1546,7 +1698,8 @@ async function startDaemonProcess() {
       req.on('end', async () => {
         const {
           fullPrompt, codeOnly, newChat, temporaryChat=false, uploadPath, uploadPaths, chatUrl, expectedArtifact, contextId='',
-          reloadBeforeAttempt=false, requestTimeoutMs=REQUEST_TIMEOUT,
+          reloadBeforeAttempt=false, requestTimeoutMs=REQUEST_TIMEOUT, nativeVisual=false,
+          nativeVisualEditLast=false,
         } = JSON.parse(body);
         const boundedRequestTimeout=Math.max(
           1_000,
@@ -1668,6 +1821,13 @@ async function startDaemonProcess() {
             await dismissBlockingOverlays(page, log);
           }
 
+          if(nativeVisualEditLast) {
+            if(!nativeVisual || requestUploads.length)
+              throw new Error('NATIVE_EDIT_MODE_INVALID: requires a mapped native image without a new upload');
+            const edited=await editLastNativeImage(page,promptToSend,requestDeadline,log);
+            return send(200,{ok:true,...edited,temporary:false});
+          }
+
           // Attach first. Uploading causes ChatGPT to re-render the composer;
           // text inserted before that re-render can remain visible in the DOM
           // while being absent from React's submission state.
@@ -1717,6 +1877,7 @@ async function startDaemonProcess() {
           const beforeTurn = await page.evaluate(() => ({
             assistant:[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1)?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null,
             user:[...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)?.closest('[data-testid^="conversation-turn-"]')?.getAttribute('data-testid') || null,
+            visualSources:[...document.querySelectorAll('[data-testid="generated-image-preview"] img, img[data-testid="generated-image-preview"]')].map(img=>img.currentSrc||img.src),
           }));
 
           // Uploaded attachments can steal the ProseMirror focus. In that state
@@ -1831,7 +1992,9 @@ async function startDaemonProcess() {
             log,
             beforeTurn.assistant,
             requestDeadline,
-            submittedUserTurnId
+            submittedUserTurnId,
+            nativeVisual === true,
+            beforeTurn.visualSources
           );
 
           const finalUrl = page.url();
@@ -1846,7 +2009,7 @@ async function startDaemonProcess() {
           log(`Done: ${output.length} chars; preview=${String(output).replace(/\s+/g,' ').slice(0,500)}`);
           const responseTurnId=await page.evaluate(()=>[...document.querySelectorAll('[data-testid^="conversation-turn-"]')]
             .filter(turn=>!turn.querySelector('[data-message-author-role="user"]')).at(-1)?.getAttribute('data-testid')||null);
-          const artifacts=await collectAssistantArtifacts(page,log,responseTurnId);
+          const artifacts=await collectAssistantArtifacts(page,log,responseTurnId,submittedUserTurnId,nativeVisual===true,beforeTurn.visualSources);
           if(artifacts.length) {
             const stillBusy=await page.evaluate(()=>!!document.querySelector('button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop answering"],button[aria-label^="Parar "],[data-is-streaming="true"]')).catch(()=>false);
             if(stillBusy) {
@@ -2138,6 +2301,8 @@ Usage:
       contextId: process.env.A0_CONTEXT_ID || '',
       reloadBeforeAttempt: process.env.BROWSER_RECOVERY_RELOAD === '1',
       requestTimeoutMs: Number(process.env.BROWSER_REQUEST_TIMEOUT_MS || REQUEST_TIMEOUT),
+      nativeVisual: process.env.BROWSER_NATIVE_VISUAL === '1',
+      nativeVisualEditLast: process.env.BROWSER_NATIVE_VISUAL_EDIT_LAST === '1',
       expectedArtifact: process.env.BROWSER_EXPECTED_ARTIFACT || '',
     };
     let result;

@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.12-stack.17 — ferramentas Kimi nativas e imagens recuperáveis
+
+- Envia ao Kimi o catálogo real de ferramentas como funções nativas da API e
+  aceita efeitos somente de `tool_calls`, mantendo o dispatcher do Agent Zero.
+- Corrige a compactação Kimi para preservar pedido ativo, restrições e estado
+  operacional; limita a espera do Browser a 540 s sem replay cego.
+- Delega geração e edição de imagem ao subagente Browser. A edição da imagem
+  recém-gerada usa o editor nativo; recibo persistente impede reenvio quando a
+  imagem demora, e o PNG é verificado e publicado no chat Kimi.
+- Torna duplo clique/Enter do mesmo rascunho idempotente na fila e adiciona
+  fallback de busca limitado quando o SearXNG não retorna resultados.
+- Inclui catálogo/testes de ferramentas nativas e regressões R-021/R-022.
+  Cobertura externa completa ainda é pendente e está documentada na auditoria.
+
 ## v2.12-stack.16 — intervenção explícita e Nudge sem ambiguidade
 
 - Exibe **Intervir agora** com texto em cada mensagem pendente durante uma
